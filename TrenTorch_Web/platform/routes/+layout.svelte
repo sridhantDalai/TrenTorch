@@ -7,6 +7,7 @@
 	import Footer from '$components/Footer.svelte';
 	import SignInDialog from '$components/SignInDialog.svelte';
 	import ProgressSync from '$components/ProgressSync.svelte';
+	import RatingSettle from '$components/RatingSettle.svelte';
 	import AfterSignInRedirect from '$components/AfterSignInRedirect.svelte';
 
 	let { children } = $props();
@@ -17,14 +18,22 @@
 	// bottom of the content" -- the homepage is the one place it's meant to
 	// be a page-ending element.
 	let showFooter = $derived(page.url.pathname === '/');
+
+	// The IDE has its own single top bar (logo, back, Run, Submit, account), so the
+	// site navbar steps aside there and the workspace gets its height back. The long theory
+	// pages hide it too, so the side menu and the text get the full height.
+	let showNavbar = $derived(
+		!page.url.pathname.startsWith('/ide') && !page.url.pathname.startsWith('/dsa/theory')
+	);
 </script>
 
 <svelte:head>
 	<link rel="icon" type="image/webp" href={favicon} />
-	<title>TrenTorch</title>
-	<meta
-		name="description"
-		content="TrenTorch: an educational ML framework you build by hand, running straight in your browser."
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+	<link
+		rel="stylesheet"
+		href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&display=swap"
 	/>
 </svelte:head>
 
@@ -32,7 +41,9 @@
      edge on any screen size, and each page's own sections cap their
      content at a readable width via the shared .container class instead. -->
 <div class="relative flex min-h-screen flex-col">
-	<Navbar />
+	{#if showNavbar}
+		<Navbar />
+	{/if}
 	<div class="w-full flex-1">
 		{@render children()}
 	</div>
@@ -42,4 +53,5 @@
 </div>
 <SignInDialog />
 <ProgressSync />
+<RatingSettle />
 <AfterSignInRedirect />

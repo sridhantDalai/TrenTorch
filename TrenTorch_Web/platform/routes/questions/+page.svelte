@@ -1,21 +1,46 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import { resolve } from '$app/paths';
 	import { browser } from '$app/environment';
-	import { CalendarCheck, ArrowRight, ChevronRight } from '@lucide/svelte';
+	import Fuse from 'fuse.js';
 	import ModuleSection from '$components/ModuleSection.svelte';
 	import PartCard from '$components/PartCard.svelte';
-	import QuestionFilters from '$components/QuestionFilters.svelte';
+	import FilterBar from '$components/FilterBar.svelte';
+	import PagePill from '$components/PagePill.svelte';
+	import StatTile from '$components/StatTile.svelte';
 	import Pagination from '$components/Pagination.svelte';
-	import Button from '$components/Button.svelte';
-	import ProfileCard from '$components/ProfileCard.svelte';
-	import ProgressSummary from '$components/ProgressSummary.svelte';
+	import ProblemsetPotdBanner from '$components/ProblemsetPotdBanner.svelte';
 	import { curriculum, getProgressStats, getPartProgress } from '$data/questions';
 	import { getPartIcon } from '$data/part-icons';
 	import { solved } from '$processes/progress-tracking/solved.svelte';
+	import { recent } from '$processes/progress-tracking/recent.svelte';
+	import { dsaResume, RESUME_LABEL } from '$processes/dsa-sheet/dsa-resume';
+	import SEO from '$components/SEO.svelte';
+	import { buildBreadcrumbJsonLd } from '$processes/seo/build-breadcrumb-json-ld';
+	import { withSiteName } from '$processes/seo/with-site-name';
+	import type { PageProps } from './$types';
 
+	let { data }: PageProps = $props();
+
+	// Green on the pill: the question they left half-done, else the first one for a newcomer, else the next
+	// unsolved one (the same rule as the DSA sheet).
+	const moduleQuestions = curriculum.flatMap((part) =>
+		part.tracks.flatMap((track) =>
+			track.questions.map((question) => ({ id: question.slug, title: question.title }))
+		)
+	);
+	const moduleGreen = $derived.by(() => {
+		const next = dsaResume(moduleQuestions, solved.slugs, recent.get('module'));
+		return next
+			? { label: RESUME_LABEL[next.kind], href: resolve('/ide/[id]', { id: next.question.id }) }
+			: null;
+	});
 	const stats = $derived(getProgressStats(solved.slugs));
 	const partProgress = $derived(getPartProgress(solved.slugs));
+	// A module is complete when every question in it is solved.
+	const completedModules = $derived(
+		partProgress.filter((part) => part.total > 0 && part.solved === part.total).length
+	);
 
 	// 14 Parts and 337+ questions is too much DOM to mount at once on first
 	// load -- paginating the (possibly filtered) Parts list, not individual
@@ -29,14 +54,15 @@
 
 	let searchQuery = $state('');
 	let solvedFilter = $state<'all' | 'solved' | 'unsolved'>('all');
-	let topicFilter = $state('all');
+	// '' is no topic chosen, which is what FilterBar means by it too.
+	let topicFilter = $state('');
 
 	// The track-picker grid is the default landing view (matches "pick a
 	// track" from a fresh visit); touching any filter switches to a flat,
 	// filtered question list instead, since "which track has a question
 	// matching X" isn't a question the card grid can answer on its own.
 	const isFiltering = $derived(
-		searchQuery.trim() !== '' || solvedFilter !== 'all' || topicFilter !== 'all'
+		searchQuery.trim() !== '' || solvedFilter !== 'all' || topicFilter !== ''
 	);
 
 	// Page number lives in the URL (?page=N), not just component state, so
@@ -48,35 +74,84 @@
 	// once this runs in an actual browser.
 	let currentPage = $state(browser ? Number(page.url.searchParams.get('page')) || 1 : 1);
 
+	const statuses = [
+		{ value: 'all', label: 'All questions' },
+		{ value: 'solved', label: 'Solved' },
+		{ value: 'unsolved', label: 'Unsolved' }
+	];
+
 	const allTopics = curriculum
 		.flatMap((part) => part.tracks.flatMap((track) => track.questions.flatMap((q) => q.topics)))
 		.filter((topic, i, arr) => arr.indexOf(topic) === i)
 		.sort();
+
+	// Fuse indexes every question once, by slug, so a search can tolerate
+	// typos and partial words ("gradint dsc" -> "Gradient Descent") instead
+	// of requiring an exact substring match. Topics are searched too, at a
+	// lower weight, so "transformer" still surfaces a question tagged with
+	// it even when that word isn't in the title.
+	const allQuestions = curriculum.flatMap((part) =>
+		part.tracks.flatMap((track) => track.questions)
+	);
+	const topicChoices = allTopics.map((topic) => ({
+		value: topic,
+		label: topic,
+		count: allQuestions.filter((question) => question.topics.includes(topic)).length
+	}));
+	const searchIndex = new Fuse(allQuestions, {
+		keys: [
+			{ name: 'title', weight: 2 },
+			{ name: 'topics', weight: 1 }
+		],
+		threshold: 0.35,
+		ignoreLocation: true
+	});
+	const matchingSlugs = $derived.by(() => {
+		const query = searchQuery.trim();
+		if (!query) return null;
+		return new Set(searchIndex.search(query).map((result) => result.item.slug));
+	});
 
 	// Filters the same Part -> Track -> Question shape ModuleSection already
 	// expects, so ModuleSection itself needs no changes: a Track with every
 	// question filtered out drops entirely, and so does a Part left with no
 	// Tracks, rather than rendering an empty section.
 	const filteredCurriculum = $derived.by(() => {
-		const query = searchQuery.trim().toLowerCase();
 		return curriculum
-			.map((part) => ({
-				...part,
-				tracks: part.tracks
-					.map((track) => ({
-						...track,
-						questions: track.questions.filter((question) => {
-							if (query && !question.title.toLowerCase().includes(query)) return false;
-							if (solvedFilter === 'solved' && !solved.isSolved(question.slug)) return false;
-							if (solvedFilter === 'unsolved' && solved.isSolved(question.slug)) return false;
-							if (topicFilter !== 'all' && !question.topics.includes(topicFilter)) return false;
-							return true;
+			.map((part) => {
+				const filterTracks = (tracks: typeof part.tracks) =>
+					tracks
+						.map((track) => ({
+							...track,
+							questions: track.questions.filter((question) => {
+								if (matchingSlugs && !matchingSlugs.has(question.slug)) return false;
+								if (solvedFilter === 'solved' && !solved.isSolved(question.slug)) return false;
+								if (solvedFilter === 'unsolved' && solved.isSolved(question.slug)) return false;
+								if (topicFilter !== '' && !question.topics.includes(topicFilter)) return false;
+								return true;
+							})
+						}))
+						.filter((track) => track.questions.length > 0);
+				return {
+					...part,
+					tracks: filterTracks(part.tracks),
+					sections: part.sections
+						?.map((section) => {
+							const tracks = filterTracks(section.tracks);
+							return { ...section, tracks, questions: tracks.flatMap((t) => t.questions) };
 						})
-					}))
-					.filter((track) => track.questions.length > 0)
-			}))
+						.filter((section) => section.tracks.length > 0)
+				};
+			})
 			.filter((part) => part.tracks.length > 0);
 	});
+
+	const matchingQuestionCount = $derived(
+		filteredCurriculum.reduce(
+			(sum, part) => sum + part.tracks.reduce((n, track) => n + track.questions.length, 0),
+			0
+		)
+	);
 
 	const totalPages = $derived(
 		isFiltering
@@ -118,47 +193,55 @@
 	});
 </script>
 
-<svelte:head>
-	<meta name="description" content="Every TrenTorch curriculum question, in one place." />
-</svelte:head>
+<SEO
+	title={withSiteName('Machine learning practice questions')}
+	description={`Browse ${stats.total} free machine learning practice questions across ${curriculum.length} sections, from math foundations to transformers, inference, and production ML. Run the tests in your browser.`}
+	path="/questions"
+	jsonLd={buildBreadcrumbJsonLd([
+		{ name: 'Home', path: '/' },
+		{ name: 'Module', path: '/questions' }
+	])}
+/>
 
-<div class="container flex flex-col gap-8 px-4 py-12 md:flex-row md:px-6">
-	<aside
-		class="w-full shrink-0 space-y-6 rounded-md border border-border p-4 md:sticky md:top-20 md:h-fit md:w-64"
-	>
-		<ProfileCard name="Student" />
-		<ProgressSummary completed={stats.completed} total={stats.total} />
-	</aside>
-
-	<div class="flex-1 space-y-8">
-		<div
-			class="flex flex-col items-start justify-between gap-4 rounded-md border border-border bg-secondary/30 p-5 sm:flex-row sm:items-center"
-		>
-			<div class="flex items-center gap-3">
-				<CalendarCheck class="size-6 shrink-0 text-muted-foreground" aria-hidden="true" />
-				<div>
-					<h2 class="font-semibold">Problems of the Day</h2>
-					<p class="text-sm text-muted-foreground">A new featured question, every day.</p>
-				</div>
-			</div>
-			<Button href={resolve('/potd')} class="shrink-0">
-				Try Now
-				<ArrowRight class="size-4" />
-			</Button>
-		</div>
-
-		<div>
-			<p class="mb-1 font-mono text-xs tracking-wider text-muted-foreground uppercase">
-				Questions <ChevronRight class="inline size-3" />
-				{curriculum.length} tracks
-				{#if stats.completed > 0}
-					<span class="text-primary">· {stats.completed}/{stats.total} solved</span>
-				{/if}
+<div class="px-4 pt-7 pb-12 sm:px-5 md:px-6">
+	<div class="mx-auto w-full max-w-[1180px] space-y-8">
+		<header class="dot-texture">
+			<PagePill slug="questions/" area="module" resume={moduleGreen} />
+			<h1 class="mb-3 font-mono text-3xl font-bold tracking-tight sm:text-4xl">Modules</h1>
+			<p class="max-w-xl text-lg text-muted-foreground">
+				From Python basics to production ML, one module at a time.
 			</p>
-			<h1 class="text-2xl font-bold">Pick a track</h1>
-		</div>
+			<div class="mt-6 grid max-w-md grid-cols-2 gap-3 sm:gap-4">
+				<StatTile
+					label="Modules"
+					value={curriculum.length}
+					tone="positive"
+					progress={{ done: completedModules, total: curriculum.length }}
+					progressLabel="complete"
+				/>
+				<StatTile
+					label="Questions"
+					value={stats.total}
+					tone="positive"
+					progress={{ done: stats.completed, total: stats.total }}
+				/>
+			</div>
+		</header>
 
-		<QuestionFilters bind:searchQuery bind:solvedFilter bind:topicFilter topics={allTopics} />
+		<ProblemsetPotdBanner summaries={data.potdSummaries} />
+
+		<FilterBar
+			bind:query={searchQuery}
+			bind:topic={topicFilter}
+			bind:status={solvedFilter}
+			topics={topicChoices}
+			difficulties={[]}
+			{statuses}
+			resultCount={matchingQuestionCount}
+			total={stats.total}
+			placeholder="Search questions..."
+			noun="question"
+		/>
 
 		{#if isFiltering}
 			{#if filteredCurriculum.length === 0}
@@ -168,7 +251,7 @@
 			{:else}
 				<div class="space-y-3">
 					{#each pagedCurriculum as part (part.id)}
-						<ModuleSection {part} />
+						<ModuleSection {part} forceOpen />
 					{/each}
 				</div>
 

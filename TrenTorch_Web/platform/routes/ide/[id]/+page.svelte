@@ -4,38 +4,95 @@
 	import { page } from '$app/state';
 	import { browser } from '$app/environment';
 	import type { QuestionContent } from '$data/curriculum/types';
-	import { pyodideService } from '$processes/code-execution/pyodide-service';
+	import { unifiedExecutor } from '$processes/code-execution/unified-executor';
+	import {
+		detectLanguage,
+		isLanguageSelectable,
+		DSA_LANGUAGES
+	} from '$processes/code-execution/detect-language';
 	import { loadUserCode } from '$processes/code-execution/load-user-code';
+	import {
+		loadDsaLanguage,
+		saveDsaLanguage
+	} from '$processes/code-execution/dsa-language-preference';
 	import { saveUserCode } from '$processes/code-execution/save-user-code';
+	import { mergeDraft, takeHomeDraft } from '$processes/potd/home-draft';
+	import { draftSync } from '$processes/code-execution/draft-sync.svelte';
 	import { resetUserCode } from '$processes/code-execution/reset-user-code';
 	import { loadIdeLayout } from '$processes/code-execution/load-ide-layout';
 	import { saveIdeLayout } from '$processes/code-execution/save-ide-layout';
 	import type { IdeLayout } from '$processes/code-execution/ide-layout-key';
 	import { solved } from '$processes/progress-tracking/solved.svelte';
 	import { attempted } from '$processes/progress-tracking/attempted.svelte';
+	import { recordPotdAttempt as recordPotdAttemptHistory } from '$processes/progress-tracking/supabase-potd-attempts-store';
+	import { isPotdQuestion } from '$processes/potd/is-potd-question';
 	import { session } from '$processes/auth/session.svelte';
-	import { signInPrompt } from '$processes/auth/sign-in-prompt.svelte';
 	import { potdEntries } from '$data/potd';
-	import { localDateString } from '$processes/potd/local-date-string';
+	import { guideTabsFor } from '$processes/ide-content/guide-tabs';
+	import { istDateString } from '$processes/potd/ist-date-string';
+	import { isCurrentPotd } from '$processes/rating/is-current-potd';
+	import { recordPotdOutcome } from '$processes/rating/supabase-rating-store';
+	import { ratingStore } from '$processes/rating/rating-store.svelte';
+	import {
+		clearPendingPotdSolve,
+		queuePendingPotdSolve
+	} from '$processes/rating/pending-potd-solves';
+	import SEO from '$components/SEO.svelte';
 	import IdeHeader from '$components/ide/IdeHeader.svelte';
+	import { ideOrigin } from '$components/ide/ide-origin';
 	import GuidePane from '$components/ide/GuidePane.svelte';
-	import CodeEditor from '$components/ide/CodeEditor.svelte';
+	import CodeEditor, {
+		EDITOR_FONT_DEFAULT,
+		EDITOR_FONT_MAX,
+		EDITOR_FONT_MIN
+	} from '$components/ide/CodeEditor.svelte';
 	import OutputConsole from '$components/ide/OutputConsole.svelte';
 	import TestResultsView from '$components/ide/TestResultsView.svelte';
+	import CustomRunPanel from '$components/ide/CustomRunPanel.svelte';
 	import PaneResizer from '$components/ide/PaneResizer.svelte';
-	import { BookOpen, Code2, Terminal, ShieldCheck, ArrowLeft } from '@lucide/svelte';
+	import WindowDots from '$components/WindowDots.svelte';
+	import { recent } from '$processes/progress-tracking/recent.svelte';
+	import { dsaQuestions } from '$data/dsa-sheet';
+	import { problemsetProblems } from '$data/problemset';
+	import IdeStatusBar from '$components/ide/IdeStatusBar.svelte';
+	import { ideTheme } from '$components/ide/ide-theme.svelte';
+	import { themeStyle } from '$components/ide/ide-themes';
+	import {
+		BookOpen,
+		Code2,
+		Terminal,
+		ShieldCheck,
+		Play,
+		ChevronDown,
+		ChevronUp,
+		ArrowLeft,
+		IndentIncrease
+	} from '@lucide/svelte';
 	import type { PageData } from './$types';
 
-	const DEFAULT_LAYOUT: IdeLayout = { leftPanePercent: 38, bottomPanePercent: 42 };
+	const DEFAULT_LAYOUT: IdeLayout = { leftPanePercent: 44, bottomPanePercent: 42 };
 	const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 	let { data } = $props<{ data: PageData }>();
+	const seo = $derived(data.seo);
 
 	// Most ids don't have content yet -- curriculum content is authored
 	// question by question, separately from this IDE. That's an expected,
 	// common state here, not an error page.
 	let content = $derived<QuestionContent | null>(data.content);
 	let userCode = $state('');
+	// Top-level functions the student can call from Custom run: the ones in the editor right now
+	// (so a function they add shows up), plus the starter's, so a deleted one is still offered.
+	let customFunctionNames = $derived.by(() => {
+		if (!content) return [];
+		const names: string[] = [];
+		for (const source of [userCode, content.starterCode]) {
+			for (const match of source.matchAll(/^def\s+([A-Za-z_]\w*)\s*\(/gm)) {
+				if (match[1] && !names.includes(match[1])) names.push(match[1]);
+			}
+		}
+		return names;
+	});
 
 	// QuestionRow.svelte carries the Questions page's own current page
 	// number in as ?from=N when linking here, so "Back to Questions" can
@@ -44,16 +101,101 @@
 	// (a pre-built href string can't be verified by eslint's
 	// svelte/no-navigation-without-resolve rule the way a direct
 	// resolve() call in the component that renders the <a> can).
+	// ?guide=theory|solution|discussion and ?panel=tests open the IDE on that guide tab or with the
+	// results panel showing, so other pages can link straight to them.
+	let requestedGuideTab = $derived.by(() => {
+		const value = browser ? page.url.searchParams.get('guide') : null;
+		return value === 'theory' || value === 'solution' || value === 'discussion'
+			? value
+			: 'description';
+	});
+	let requestedPanel = $derived(browser ? page.url.searchParams.get('panel') : null);
 	let fromPage = $derived(browser ? page.url.searchParams.get('from') : null);
-	let backHref = $derived(
-		fromPage ? resolve(`/questions?page=${fromPage}`) : resolve('/questions')
+	let fromPotd = $derived(browser ? page.url.searchParams.get('src') === 'potd' : false);
+	let fromProblemset = $derived(
+		browser ? page.url.searchParams.get('src') === 'problemset' : false
 	);
+	// The same rule as the header's back arrow and drawer: back goes to the list this question came from.
+	const origin = $derived(
+		ideOrigin({
+			isDsa: data.content?.metadata.kind === 'dsa',
+			fromPotd,
+			fromProblemset,
+			hasPotdList: Boolean(data.potdList),
+			hasProblemsetList: Boolean(data.problemsetList),
+			hasTrack: data.trackQuestions.questions.length > 0
+		})
+	);
+	let fromProblemsetList = $derived(origin === 'problemset');
+	let backHref = $derived(
+		origin === 'dsa'
+			? resolve('/dsa')
+			: origin === 'potd'
+				? fromPage
+					? resolve(`/potd?page=${fromPage}`)
+					: resolve('/potd')
+				: origin === 'problemset'
+					? fromPage
+						? resolve(`/problemset?page=${fromPage}`)
+						: resolve('/problemset')
+					: fromPage
+						? resolve(`/questions?page=${fromPage}`)
+						: data.trackQuestions.partId
+							? resolve('/questions/[partId]', { partId: data.trackQuestions.partId })
+							: resolve('/questions')
+	);
+
+	// Remember where the student is, for the green dot on the module / problemset / DSA pages.
+	const dsaSlugs = new Set(dsaQuestions.map((q) => q.id));
+	const problemsetSlugs = new Set(problemsetProblems.map((q) => q.slug));
+	$effect(() => {
+		if (!content || fromPotd) return;
+		const id = content.id;
+		if (dsaSlugs.has(id)) recent.note('dsa', id);
+		else if (problemsetSlugs.has(id)) recent.note('problemset', id);
+		else if (data.trackQuestions.partId) recent.note('module', id);
+	});
+
+	// How the two big panes share the screen (md and up). The window dots move with the question: they sit
+	// in the guide's title bar while it is on show, and in the editor's once the guide has been folded away.
+	let paneMode = $state<'split' | 'guideMax' | 'editorMax'>('split');
+	const dotActions = $derived({
+		red: { label: 'back', href: backHref },
+		yellow: {
+			label: 'fold question',
+			onclick: () => (paneMode = 'editorMax'),
+			disabled: paneMode !== 'split'
+		},
+		green:
+			paneMode === 'split'
+				? { label: 'expand question', onclick: () => (paneMode = 'guideMax') }
+				: {
+						label: paneMode === 'guideMax' ? 'restore editor' : 'restore question',
+						onclick: () => (paneMode = 'split'),
+						restore: true
+					}
+	});
 
 	// Prev/next in the same curriculum order /questions lists them in, so
 	// the guide pane's arrows step through in the exact order a student
 	// would encounter these questions from the menu. GuidePane turns these
 	// ids into hrefs itself (via resolve).
 	let adjacentQuestions = $derived({ prevId: data.prevId, nextId: data.nextId });
+	// Same ?from=N is carried through, so "back" a few questions later still lands on
+	// the page the student came from.
+	const questionHref = (id: string | null) => {
+		if (!id) return null;
+		const query = [
+			fromPage && `from=${fromPage}`,
+			fromPotd && 'src=potd',
+			fromProblemset && 'src=problemset'
+		].filter(Boolean);
+		return query.length
+			? resolve(`/ide/[id]?${query.join('&')}`, { id })
+			: resolve('/ide/[id]', { id });
+	};
+	let prevHref = $derived(questionHref(adjacentQuestions.prevId));
+	let nextHref = $derived(questionHref(adjacentQuestions.nextId));
 
 	// Problem of the Day questions get a reduced guide: today's featured
 	// question -- and any question scheduled for a FUTURE date, reachable
@@ -67,34 +209,124 @@
 	// other "what day is it" read in this codebase: there's no real
 	// visitor "now" at prerender time, so this defaults to the full tab
 	// set until hydration can compute it for real.
-	let guideTabs = $derived.by<('description' | 'theory' | 'solution')[]>(() => {
-		if (!content || !browser) return ['description', 'theory', 'solution'];
-		const entry = potdEntries.find((e) => e.questionId === content.id);
-		if (!entry) return ['description', 'theory', 'solution'];
-		const today = localDateString(new Date());
-		return entry.date < today ? ['description', 'theory'] : ['description'];
-	});
+	let guideTabs = $derived(
+		guideTabsFor(
+			content ? { id: content.id, kind: content.metadata.kind } : undefined,
+			potdEntries,
+			browser ? istDateString(new Date()) : null
+		)
+	);
 
 	// "Run" checks the code against just this many of the visible test
 	// cases (LeetCode-style), for a fast sanity pass. "Submit" runs the
 	// whole hidden suite and is what actually marks the question solved.
 	const SAMPLE_TEST_COUNT = 2;
-	let activeRightTab = $state<'console' | 'tests'>('tests');
+	let activeRightTab = $state<'console' | 'tests' | 'custom'>('tests');
+	// The results panel starts as just its tab bar, so the editor gets the height, and opens
+	// when something is run or a tab is picked.
+	let resultsOpen = $state(false);
+	$effect(() => {
+		void content?.id;
+		resultsOpen = requestedPanel === 'tests';
+		if (requestedPanel === 'tests') {
+			activeRightTab = 'tests';
+			mobileActiveTab = 'output';
+		}
+	});
 	let mobileActiveTab = $state<'guide' | 'editor' | 'output'>('editor');
+	let ratingFeedback = $state<{
+		questionId: string;
+		message: string;
+		tone: 'success' | 'warning' | 'neutral';
+	} | null>(null);
+	let visibleRatingFeedback = $derived(
+		ratingFeedback?.questionId === content?.id ? ratingFeedback : null
+	);
 
 	// Plain references to the service's stores, not $state -- wrapping a
 	// legacy svelte/store writable in $state() proxies the store object
 	// itself instead of tracking its value, which silently breaks the
 	// $storeName auto-subscription below (Run/Submit would appear to do
 	// nothing: the store updates, but this component never re-renders).
-	const runtimeState = pyodideService.runtimeState;
-	const consoleOutput = pyodideService.consoleOutput;
-	const testResults = pyodideService.testResults;
-	const isRunning = pyodideService.isRunning;
+	const runtimeState = unifiedExecutor.runtimeState;
+	const consoleOutput = unifiedExecutor.consoleOutput;
+	const consoleError = unifiedExecutor.consoleError;
+	const testResults = unifiedExecutor.testResults;
+	const isRunning = unifiedExecutor.isRunning;
+	const consoleFigures = unifiedExecutor.consoleFigures;
 
 	let ideRoot: HTMLDivElement | undefined = $state();
 	let isFullscreen = $state(false);
 	let cursorPos = $state({ line: 1, col: 1 });
+	let reindentCode = $state<() => void>(() => {});
+
+	const FONT_SIZE_KEY = 'trentorch:editor-font-size';
+	function loadFontSize(): number {
+		try {
+			const saved = Number(localStorage.getItem(FONT_SIZE_KEY));
+			if (saved >= EDITOR_FONT_MIN && saved <= EDITOR_FONT_MAX) return Math.round(saved);
+		} catch {
+			// storage blocked: use the default
+		}
+		return EDITOR_FONT_DEFAULT;
+	}
+	let editorFontSize = $state(browser ? loadFontSize() : EDITOR_FONT_DEFAULT);
+	$effect(() => {
+		try {
+			localStorage.setItem(FONT_SIZE_KEY, String(editorFontSize));
+		} catch {
+			// storage blocked: the size just won't persist
+		}
+	});
+	// For DSA questions the student can pick their language; everything else stays
+	// auto-detected from content. selectedLanguage is reset to the auto-detected
+	// default whenever content changes (see the $effect below).
+	let selectedLanguage = $state<ReturnType<typeof detectLanguage> | null>(null);
+	let languageSelectable = $derived(content ? isLanguageSelectable(content) : false);
+	let language = $derived(
+		languageSelectable && selectedLanguage
+			? selectedLanguage
+			: content
+				? detectLanguage(content)
+				: 'python'
+	);
+	let isSql = $derived(language === 'sql');
+
+	const LANGUAGE_LABELS: Record<string, string> = {
+		python: 'Python',
+		javascript: 'JavaScript',
+		cpp: 'C++',
+		java: 'Java',
+		go: 'Go',
+		rust: 'Rust'
+	};
+
+	// The starter for a language: Python's is the hand-written one, the others are built from the
+	// question's signature (processes/ide-content/build-language-starters.ts).
+	function starterFor(lang: string): string {
+		if (!content) return '';
+		if (lang === 'python') return content.starterCode;
+		return (
+			content.languageStarters?.[lang as keyof NonNullable<typeof content.languageStarters>] ?? ''
+		);
+	}
+
+	function handleLanguageChange(next: string) {
+		if (!content) return;
+		const picked = next as ReturnType<typeof detectLanguage>;
+		selectedLanguage = picked;
+		saveDsaLanguage(picked);
+		// Also starts downloading that language's runtime and packages.
+		unifiedExecutor.setLanguage(picked);
+		// Each language keeps its own draft; one never seen before opens on its starter.
+		userCode = loadUserCode(content.id, starterFor(picked), picked);
+		editedSinceLoad = false;
+		// Whatever Run/Submit showed was for the other language's code.
+		unifiedExecutor.testResults.set(null);
+		unifiedExecutor.consoleOutput.set('');
+		unifiedExecutor.consoleError.set(false);
+		unifiedExecutor.consoleFigures.set([]);
+	}
 	let lastSavedAt = $state<number | null>(null);
 
 	// Resizable panes: left guide/code split, and code/console split within
@@ -124,6 +356,7 @@
 	}
 
 	onMount(() => {
+		ideTheme.init();
 		const layout = loadIdeLayout(DEFAULT_LAYOUT);
 		leftPanePercent = layout.leftPanePercent;
 		bottomPanePercent = layout.bottomPanePercent;
@@ -131,8 +364,26 @@
 		const onFullscreenChange = () => {
 			isFullscreen = document.fullscreenElement === ideRoot;
 		};
+		const onIdeKeydown = (event: KeyboardEvent) => {
+			if (
+				event.key !== 'F5' ||
+				event.repeat ||
+				event.shiftKey ||
+				event.altKey ||
+				event.ctrlKey ||
+				event.metaKey
+			) {
+				return;
+			}
+			event.preventDefault();
+			void handleRunCode();
+		};
 		document.addEventListener('fullscreenchange', onFullscreenChange);
-		return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+		document.addEventListener('keydown', onIdeKeydown);
+		return () => {
+			document.removeEventListener('fullscreenchange', onFullscreenChange);
+			document.removeEventListener('keydown', onIdeKeydown);
+		};
 	});
 
 	$effect(() => {
@@ -144,35 +395,66 @@
 			// onMount-only call would miss that second case entirely, since
 			// SvelteKit reuses this component across /ide/[id] param changes
 			// rather than remounting it.
-			pyodideService.init();
-			userCode = loadUserCode(content.id, content.starterCode);
-			pyodideService.testResults.set(null);
+			const preferred = isLanguageSelectable(content) ? loadDsaLanguage() : null;
+			selectedLanguage = preferred;
+			unifiedExecutor.init(content);
+			if (preferred) unifiedExecutor.setLanguage(preferred);
+			const openLanguage = preferred ?? detectLanguage(content);
+			userCode = loadUserCode(content.id, starterFor(openLanguage), openLanguage);
+			// Typed into the landing page's code window: it becomes this question's draft, unless the
+			// student already has code here (the draft is cleared either way).
+			const homeDraft = openLanguage === 'python' ? takeHomeDraft(content.id) : null;
+			// The window showed either the starter or code already saved here; it only applies to that exact text.
+			const draftBase = homeDraft?.base ?? content.starterCode;
+			if (homeDraft && userCode === draftBase) {
+				userCode = mergeDraft(draftBase, homeDraft);
+				saveUserCode(content.id, userCode, openLanguage);
+			}
+			editedSinceLoad = false;
+			unifiedExecutor.testResults.set(null);
+			unifiedExecutor.consoleError.set(false);
 			// Also clear the console: otherwise the previous question's Run/
 			// Submit output stays on screen, now sitting under a different
 			// question's title -- easy to misread as this question's result.
-			pyodideService.consoleOutput.set('');
+			unifiedExecutor.consoleOutput.set('');
+			unifiedExecutor.consoleFigures.set([]);
 			lastSavedAt = Date.now();
 		}
 	});
 
+	// Set once the student types, so a sync landing mid-edit never swaps code
+	// out from under them; before that, newer code from another device is loaded.
+	let editedSinceLoad = false;
+
+	$effect(() => {
+		void draftSync.version;
+		// Only Python drafts sync across devices.
+		if (!content || language !== 'python') return;
+		if (editedSinceLoad || !draftSync.wasPulled(content.id)) return;
+		userCode = loadUserCode(content.id, content.starterCode);
+	});
+
 	function handleCodeChange(newCode: string) {
 		if (!content) return;
+		editedSinceLoad = true;
 		userCode = newCode;
-		saveUserCode(content.id, newCode);
+		saveUserCode(content.id, newCode, language);
 		lastSavedAt = Date.now();
 	}
 
 	function handleResetCode() {
 		if (!content) return;
 		if (confirm('Reset code to the original starter template for this question?')) {
-			resetUserCode(content.id);
-			userCode = content.starterCode;
+			resetUserCode(content.id, language);
+			userCode = starterFor(language);
 			lastSavedAt = Date.now();
 			// Whatever Run/Submit showed was for the code that just got
 			// discarded -- leaving it up would read as still describing the
 			// (now reset) editor content.
-			pyodideService.testResults.set(null);
-			pyodideService.consoleOutput.set('');
+			unifiedExecutor.testResults.set(null);
+			unifiedExecutor.consoleOutput.set('');
+			unifiedExecutor.consoleFigures.set([]);
+			unifiedExecutor.consoleError.set(false);
 		}
 	}
 
@@ -187,43 +469,71 @@
 			)
 		) {
 			resetUserCode(content.id);
-			userCode = content.starterCode;
+			userCode = starterFor(language);
 			lastSavedAt = Date.now();
 			solved.unmarkSolved(content.id);
 			attempted.unmarkAttempted(content.id);
 			// Same as Reset: an old "All Tests Passed" left on screen would
 			// directly contradict "marked unsolved again" happening right above it.
-			pyodideService.testResults.set(null);
-			pyodideService.consoleOutput.set('');
+			unifiedExecutor.testResults.set(null);
+			unifiedExecutor.consoleOutput.set('');
+			unifiedExecutor.consoleFigures.set([]);
+			unifiedExecutor.consoleError.set(false);
 		}
 	}
 
+	// A question may ship an example (preview.py) that calls the student's function on sample data.
+	// Its text goes under the test results and any charts it draws appear above them.
+	async function showPreview(code: string, previewCode: string | undefined) {
+		if (!previewCode) return;
+		const preview = await unifiedExecutor.runPreview(code, previewCode);
+		const text = [
+			preview.output.trim(),
+			preview.error ? `The preview could not run:\n${preview.error}` : ''
+		]
+			.filter(Boolean)
+			.join('\n\n');
+		if (text) consoleOutput.update((previous) => `${previous}\n\n--- Preview ---\n${text}`);
+	}
+
 	async function handleRunCode() {
-		if (!session.user) {
-			signInPrompt.open();
-			return;
-		}
+		activeRightTab = 'console';
+		resultsOpen = true;
 		mobileActiveTab = 'output';
 
 		// No question loaded (an id with no published content): nothing to
 		// check against, so just exec and print, same as before.
 		if (!content) {
-			activeRightTab = 'console';
 			try {
-				await pyodideService.runCode(userCode);
+				await unifiedExecutor.runCode(userCode);
 			} catch (e) {
 				console.error('Run failed', e);
+				consoleError.set(true);
 				consoleOutput.set(`[Run failed]: ${e instanceof Error ? e.message : String(e)}`);
 			}
 			return;
 		}
 
+		// SQL Run behaves like a SQL console: execute the script and show the
+		// result table (or SQLite's own error) -- the tests are Submit's job.
+		if (isSql) {
+			try {
+				await unifiedExecutor.runCode(userCode, content.dbSchema);
+			} catch (e) {
+				console.error('Run failed', e);
+				consoleError.set(true);
+				consoleOutput.set(`[Run failed]: ${e instanceof Error ? e.message : String(e)}`);
+			}
+			return;
+		}
+
+		unifiedExecutor.consoleFigures.set([]);
+
 		// LeetCode-style Run: execute the code against the first couple of
-		// visible checks and show pass/fail, without marking the question
-		// attempted or solved -- that's Submit's job.
-		activeRightTab = 'tests';
+		// visible checks and show pass/fail in the Console, without marking
+		// the question attempted or solved -- that's Submit's job.
 		try {
-			const result = await pyodideService.runTests(
+			const result = await unifiedExecutor.runTests(
 				userCode,
 				content.testHarnessCode,
 				content.id,
@@ -231,8 +541,10 @@
 			);
 			// Surface the student's own print() output in the Console tab too.
 			consoleOutput.set(result.rawOutput?.trim() || '(no output)');
+			await showPreview(userCode, content.previewCode);
 		} catch (e) {
 			console.error('Run failed', e);
+			consoleError.set(true);
 			// Surface the failure where the student can actually see it --
 			// a devtools-only error looks identical to nothing happening.
 			consoleOutput.set(`[Run failed]: ${e instanceof Error ? e.message : String(e)}`);
@@ -240,15 +552,24 @@
 	}
 
 	async function handleRunTests() {
-		if (!session.user) {
-			signInPrompt.open();
-			return;
-		}
 		if (!content) return;
 		activeRightTab = 'tests';
+		resultsOpen = true;
 		mobileActiveTab = 'output';
+		ratingFeedback = null;
+		// Snapshot what is actually being tested. The student can keep typing or
+		// switch question while the tests run, and the GitHub save below must
+		// commit the exact code that passed, for the question that passed.
+		const submitted = content;
+		const submittedCode = userCode;
 		try {
-			const result = await pyodideService.runTests(userCode, content.testHarnessCode, content.id);
+			const result = await unifiedExecutor.runTests(
+				submittedCode,
+				submitted.testHarnessCode,
+				submitted.id,
+				undefined,
+				submitted.dbSchema
+			);
 			// Getting here means the hidden tests actually ran: mark the
 			// question attempted regardless of the outcome, then solved on top
 			// of that if every test passed. Both feed the same stores the
@@ -266,18 +587,140 @@
 			if (result.allPassed) {
 				solved.markSolved(result.contentId);
 			}
+			if (isPotdQuestion(result.contentId)) {
+				if (!isCurrentPotd(result.contentId)) {
+					if (result.allPassed) {
+						ratingFeedback = {
+							questionId: result.contentId,
+							tone: 'neutral',
+							message:
+								"Past POTDs do not change your rating. Your solve is still recorded locally. The day's POTD rotates at midnight IST."
+						};
+					}
+					return;
+				}
+
+				if (!session.user) {
+					ratingFeedback = {
+						questionId: result.contentId,
+						tone: 'warning',
+						message:
+							'Sign in to save this attempt and receive a rating update. This run was only recorded locally.'
+					};
+					return;
+				}
+
+				// Persist the attempt before requesting a solve rating: the database
+				// validates the rating against this durable solved-attempt record.
+				const attemptSaved = await recordPotdAttemptHistory(
+					result.contentId,
+					result.passedTests,
+					result.totalTests,
+					result.allPassed
+				);
+				const pending = {
+					userId: session.user.id,
+					questionId: result.contentId,
+					passedTests: result.passedTests,
+					totalTests: result.totalTests
+				};
+				if (!attemptSaved.ok) {
+					if (result.allPassed) queuePendingPotdSolve(pending);
+					ratingFeedback = {
+						questionId: result.contentId,
+						tone: 'warning',
+						message:
+							'Your attempt could not be saved, so no rating update was confirmed. We will retry automatically the next time you open TrenTorch today.' +
+							(attemptSaved.code ? ` (error ${attemptSaved.code})` : '')
+					};
+					return;
+				}
+
+				if (!result.allPassed) {
+					ratingFeedback = {
+						questionId: result.contentId,
+						tone: 'neutral',
+						message:
+							'No rating changes on failed submits today. An unsuccessful attempt may be settled after the POTD day ends if it remains unsolved.'
+					};
+					return;
+				}
+
+				const outcome = await recordPotdOutcome(result.contentId, 'solved');
+				if (!outcome) {
+					queuePendingPotdSolve(pending);
+					ratingFeedback = {
+						questionId: result.contentId,
+						tone: 'warning',
+						message:
+							'Your solve was recorded, but the rating update could not be confirmed. We will retry automatically the next time you open TrenTorch today.'
+					};
+					return;
+				}
+
+				clearPendingPotdSolve(pending.userId, pending.questionId);
+				ratingStore.setRating(outcome.ratingAfter);
+				const amount = Math.abs(outcome.delta);
+				const signedAmount = outcome.delta > 0 ? `+${amount}` : `${outcome.delta}`;
+				const reason = outcome.alreadyRecorded
+					? outcome.delta < 0
+						? `This POTD was already settled as unsuccessful: ${signedAmount} was applied previously. A later solve does not reverse a settled rating.`
+						: `This POTD was already rated: ${signedAmount} was applied previously; this submit made no additional change.`
+					: outcome.delta > 0
+						? `Rating change: ${signedAmount}.`
+						: 'No rating change: the solve reward rounded to zero at your current rating.';
+				ratingFeedback = {
+					questionId: result.contentId,
+					tone: outcome.delta < 0 ? 'warning' : 'success',
+					message: `${reason} Your rating is now ${outcome.ratingAfter}.`
+				};
+			}
 		} catch (e) {
 			console.error('Test run failed', e);
+			consoleError.set(true);
 			consoleOutput.set(`[Submit failed]: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	async function handleRunCustom(
+		functionName: string,
+		argumentsJson: string,
+		expectedJson: string
+	) {
+		if (!content) return;
+		activeRightTab = 'console';
+		resultsOpen = true;
+		mobileActiveTab = 'output';
+		unifiedExecutor.testResults.set(null);
+		unifiedExecutor.consoleError.set(false);
+		try {
+			await unifiedExecutor.runCustomTest(
+				userCode,
+				content.testHarnessCode,
+				content.id,
+				functionName,
+				argumentsJson,
+				expectedJson
+			);
+		} catch (error) {
+			console.error('Custom run failed', error);
+			consoleError.set(true);
+			consoleOutput.set(
+				`[Custom run failed]: ${error instanceof Error ? error.message : String(error)}`
+			);
 		}
 	}
 
 	let runtimeStatusText = $derived.by(() => {
 		switch ($runtimeState) {
 			case 'loading_runtime':
-				return 'Loading Python runtime…';
+				return isSql
+					? 'Loading SQLite…'
+					: `Loading ${LANGUAGE_LABELS[language] ?? 'Python'} runtime…`;
 			case 'loading_packages':
-				return 'Loading NumPy…';
+				return isSql
+					? 'Loading SQLite…'
+					: `Loading ${LANGUAGE_LABELS[language] ?? 'Python'} packages…`;
 			case 'running':
 				return 'Executing…';
 			case 'testing':
@@ -285,7 +728,7 @@
 			case 'error':
 				return 'Runtime error';
 			default:
-				return 'Python 3.12 • Shift+Enter to run';
+				return 'Ready';
 		}
 	});
 
@@ -302,11 +745,16 @@
 	}
 </script>
 
+<SEO
+	title={seo.title}
+	description={seo.description}
+	path={seo.path}
+	type="article"
+	noindex={!seo.indexable}
+	jsonLd={seo.jsonLd}
+/>
+
 <svelte:head>
-	<meta
-		name="description"
-		content="Build deep learning framework primitives in Python directly in your browser with TrenTorch."
-	/>
 	{#if content}
 		<!-- Warm the connection to Pyodide's CDN as soon as we know we'll need
 		     it, instead of waiting for the worker to open the request cold. -->
@@ -316,7 +764,7 @@
 
 {#if !content}
 	<div
-		class="flex h-[calc(100vh-3.5rem)] w-full flex-col items-center justify-center gap-4 bg-background px-6 text-center"
+		class="flex h-dvh w-full flex-col items-center justify-center gap-4 bg-background px-6 text-center"
 	>
 		<p class="font-mono text-sm text-muted-foreground">
 			No IDE content published yet for <span class="text-foreground">{data.id}</span>.
@@ -326,21 +774,35 @@
 			class="flex items-center gap-1.5 border border-border bg-secondary px-3 py-1.5 font-mono text-xs text-foreground transition-colors hover:border-foreground/30 hover:bg-muted"
 		>
 			<ArrowLeft class="size-3" />
-			Back to Questions
+			{fromPotd
+				? 'Back to Problem of the Day'
+				: fromProblemsetList
+					? 'Back to Problemset'
+					: 'Back to Module'}
 		</a>
 	</div>
 {:else}
 	<div
 		bind:this={ideRoot}
-		class="ide-shell flex h-[calc(100vh-3.5rem)] w-full flex-col overflow-hidden bg-black font-mono text-white"
+		class="ide-shell flex h-dvh w-full flex-col overflow-hidden"
+		style={themeStyle(ideTheme.current)}
 	>
 		<!-- IDE Top Header -->
 		<IdeHeader
 			{content}
 			{fromPage}
+			{fromPotd}
+			{fromProblemset}
+			problemsetList={data.problemsetList}
+			potdList={data.potdList}
+			trackQuestions={data.trackQuestions}
 			runtimeState={$runtimeState}
 			isRunning={$isRunning}
 			{isFullscreen}
+			{prevHref}
+			{nextHref}
+			fontSize={editorFontSize}
+			onFontSize={(size) => (editorFontSize = size)}
 			onResetCode={handleResetCode}
 			onReattempt={handleReattemptQuestion}
 			onRunCode={handleRunCode}
@@ -349,11 +811,14 @@
 		/>
 
 		<!-- Mobile Tab Switcher -->
-		<div class="flex border-b border-border bg-secondary text-xs md:hidden">
+		<div
+			class="mx-2 mb-2 flex gap-1 rounded-lg border border-border bg-secondary p-1 text-xs md:hidden"
+		>
 			<button
 				type="button"
-				class="flex flex-1 items-center justify-center gap-1.5 py-2 {mobileActiveTab === 'guide'
-					? 'border-b-2 border-primary bg-primary font-bold text-primary-foreground'
+				class="flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 font-medium transition-colors {mobileActiveTab ===
+				'guide'
+					? 'bg-muted text-foreground'
 					: 'text-muted-foreground'}"
 				onclick={() => (mobileActiveTab = 'guide')}
 			>
@@ -362,8 +827,9 @@
 			</button>
 			<button
 				type="button"
-				class="flex flex-1 items-center justify-center gap-1.5 py-2 {mobileActiveTab === 'editor'
-					? 'border-b-2 border-primary bg-primary font-bold text-primary-foreground'
+				class="flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 font-medium transition-colors {mobileActiveTab ===
+				'editor'
+					? 'bg-muted text-foreground'
 					: 'text-muted-foreground'}"
 				onclick={() => (mobileActiveTab = 'editor')}
 			>
@@ -372,8 +838,9 @@
 			</button>
 			<button
 				type="button"
-				class="flex flex-1 items-center justify-center gap-1.5 py-2 {mobileActiveTab === 'output'
-					? 'border-b-2 border-primary bg-primary font-bold text-primary-foreground'
+				class="flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 font-medium transition-colors {mobileActiveTab ===
+				'output'
+					? 'bg-muted text-foreground'
 					: 'text-muted-foreground'}"
 				onclick={() => (mobileActiveTab = 'output')}
 			>
@@ -383,22 +850,32 @@
 		</div>
 
 		<!-- Main Multi-Pane Area -->
-		<div bind:this={mainAreaEl} class="flex flex-1 overflow-hidden">
+		<div bind:this={mainAreaEl} class="flex flex-1 overflow-hidden px-2 pb-2">
 			<!-- Left Pane: Guide -->
 			<div
-				class="ide-left-pane h-full shrink-0 overflow-hidden border-r border-border {mobileActiveTab ===
+				class="ide-left-pane h-full shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-background {mobileActiveTab ===
 				'guide'
-					? 'block w-full'
-					: 'hidden md:block'}"
-				style="--ide-left-pane-percent: {leftPanePercent}%"
+					? 'flex w-full'
+					: paneMode === 'editorMax'
+						? 'hidden'
+						: 'hidden md:flex'}"
+				style="--ide-left-pane-percent: {paneMode === 'guideMax' ? 100 : leftPanePercent}%"
 			>
-				<GuidePane
-					{content}
-					isCompleted={solved.isSolved(content.id)}
-					prevId={adjacentQuestions.prevId}
-					nextId={adjacentQuestions.nextId}
-					visibleTabs={guideTabs}
-				/>
+				<div
+					class="hidden h-10 shrink-0 items-center border-b border-border bg-secondary px-3 md:flex"
+				>
+					<WindowDots {...dotActions} />
+				</div>
+				<div class="min-h-0 flex-1">
+					<GuidePane
+						{content}
+						isCompleted={solved.isSolved(content.id)}
+						companies={data.companies}
+						visibleTabs={guideTabs}
+						initialTab={requestedGuideTab}
+						{language}
+					/>
+				</div>
 			</div>
 
 			<PaneResizer
@@ -407,59 +884,78 @@
 				valueNow={leftPanePercent}
 				valueMin={20}
 				valueMax={60}
-				class="hidden md:block"
+				class={paneMode === 'split' ? 'hidden md:block' : 'hidden'}
 			/>
 
 			<!-- Right Column: Code Editor (Top) + Terminal & Test Suite (Bottom) -->
 			<div
 				bind:this={rightColumnEl}
 				class="flex h-full flex-1 flex-col overflow-hidden {mobileActiveTab === 'guide'
-					? 'hidden md:flex'
-					: 'flex w-full'}"
+					? paneMode === 'guideMax'
+						? 'hidden'
+						: 'hidden md:flex'
+					: paneMode === 'guideMax'
+						? 'hidden'
+						: 'flex w-full'}"
 			>
 				<!-- Top Section: Editor -->
 				<div
-					class="flex min-h-[40%] flex-1 flex-col overflow-hidden border-b border-border {mobileActiveTab ===
+					class="flex min-h-[40%] flex-1 flex-col overflow-hidden rounded-lg border border-border bg-background {mobileActiveTab ===
 					'output'
 						? 'hidden md:flex'
 						: 'flex w-full'}"
 				>
 					<div
-						class="flex h-8 items-center justify-between border-b border-border bg-secondary px-3 text-[11px] text-muted-foreground"
+						class="flex h-10 shrink-0 items-center justify-between border-b border-border bg-secondary px-3 text-xs text-muted-foreground"
 					>
-						<div class="flex items-center gap-1.5">
-							<Code2 class="size-3" />
-							<span>{content.id}.py</span>
-						</div>
-						<div
-							class="flex items-center gap-1.5 text-[10px] {$runtimeState === 'loading_runtime' ||
-							$runtimeState === 'loading_packages'
-								? 'text-amber-600 dark:text-amber-500'
-								: $runtimeState === 'error'
-									? 'text-red-600 dark:text-red-400'
-									: 'text-muted-foreground'}"
-						>
-							{#if $runtimeState === 'loading_runtime' || $runtimeState === 'loading_packages'}
-								<span class="size-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true"
-								></span>
+						<div class="flex items-center gap-2">
+							{#if paneMode === 'editorMax'}
+								<span class="mr-1 hidden md:flex"><WindowDots {...dotActions} /></span>
 							{/if}
-							{runtimeStatusText}
+							<Code2 class="size-4 text-(--ide-accent)" />
+							{#if languageSelectable}
+								<select
+									class="rounded-md border border-border bg-secondary px-1.5 py-0.5 text-sm font-medium text-foreground"
+									value={language}
+									onchange={(e) => handleLanguageChange((e.target as HTMLSelectElement).value)}
+								>
+									{#each DSA_LANGUAGES as lang (lang)}
+										<option value={lang}>{LANGUAGE_LABELS[lang]}</option>
+									{/each}
+								</select>
+							{:else}
+								<span class="text-sm font-medium text-foreground">{isSql ? 'SQL' : 'Python'}</span>
+							{/if}
+						</div>
+						<div class="flex items-center gap-2">
+							{#if !isSql}
+								<button
+									type="button"
+									class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+									onclick={() => reindentCode()}
+									title="Fix indentation for the entire file"
+									aria-label="Fix indentation"
+								>
+									<IndentIncrease class="size-3.5" />
+									<span class="hidden sm:inline">Fix indent</span>
+								</button>
+							{/if}
 						</div>
 					</div>
-					<div class="flex-1 overflow-hidden">
-						<CodeEditor
-							value={userCode}
-							onRun={handleRunCode}
-							onChange={handleCodeChange}
-							onCursorChange={(pos) => (cursorPos = pos)}
-						/>
-					</div>
-					<!-- Editor status bar -->
-					<div
-						class="flex h-6 shrink-0 items-center justify-between border-t border-border bg-secondary px-3 text-[10px] text-muted-foreground"
-					>
-						<span>{lastSavedAt ? 'Saved' : ''}</span>
-						<span class="tabular-nums">Ln {cursorPos.line}, Col {cursorPos.col}</span>
+					<div class="min-h-0 flex-1 overflow-hidden">
+						{#key language}
+							<CodeEditor
+								{language}
+								value={userCode}
+								onRun={handleRunCode}
+								onChange={handleCodeChange}
+								onCursorChange={(pos) => (cursorPos = pos)}
+								bind:reindent={reindentCode}
+								bind:fontSize={editorFontSize}
+								palette={ideTheme.current.editor}
+								dark={ideTheme.current.mode === 'dark'}
+							/>
+						{/key}
 					</div>
 				</div>
 
@@ -469,57 +965,121 @@
 					valueNow={bottomPanePercent}
 					valueMin={15}
 					valueMax={75}
-					class="hidden md:block"
+					class={resultsOpen ? 'hidden md:block' : 'hidden'}
 				/>
 
 				<!-- Bottom Section: Terminal & Test Results -->
 				<div
-					class="ide-bottom-pane flex min-h-[180px] shrink-0 flex-col overflow-hidden {mobileActiveTab ===
-					'editor'
+					class="ide-bottom-pane flex min-h-[180px] shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-background {resultsOpen
+						? ''
+						: 'ide-bottom-collapsed'} {mobileActiveTab === 'editor'
 						? 'hidden md:flex'
 						: 'flex h-[42%] w-full'}"
 					style="--ide-bottom-pane-percent: {bottomPanePercent}%"
 				>
 					<!-- Tabs Bar -->
-					<div class="flex h-8 items-center border-b border-border bg-secondary px-1 text-xs">
+					<div
+						class="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-secondary px-2 text-xs"
+						role="tablist"
+					>
+						{#each [{ id: 'tests', label: 'Test result', icon: ShieldCheck }, { id: 'console', label: 'Console', icon: Terminal }, ...(isSql ? [] : [{ id: 'custom', label: 'Custom run', icon: Play }])] as tab (tab.id)}
+							<button
+								type="button"
+								role="tab"
+								aria-selected={activeRightTab === tab.id}
+								class="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors {activeRightTab ===
+								tab.id
+									? 'bg-muted text-foreground'
+									: 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}"
+								onclick={() => {
+									activeRightTab = tab.id as 'tests' | 'console' | 'custom';
+									resultsOpen = true;
+								}}
+							>
+								<tab.icon class="size-3.5" />
+								<span>{tab.label}</span>
+							</button>
+						{/each}
+						<span
+							class="ml-auto hidden pr-1 text-xs text-muted-foreground {resultsOpen
+								? ''
+								: 'md:inline'}">Run your code to see results</span
+						>
 						<button
 							type="button"
-							class="flex items-center gap-1.5 px-3 py-1 font-mono text-[11px] tracking-wider uppercase transition-colors {activeRightTab ===
-							'tests'
-								? 'border-t-2 border-primary bg-primary font-bold text-primary-foreground'
-								: 'text-muted-foreground hover:text-foreground'}"
-							onclick={() => (activeRightTab = 'tests')}
+							class="hidden rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:flex {resultsOpen
+								? 'ml-auto'
+								: ''}"
+							title={resultsOpen ? 'Collapse results' : 'Show results'}
+							aria-label={resultsOpen ? 'Collapse results' : 'Show results'}
+							aria-expanded={resultsOpen}
+							onclick={() => (resultsOpen = !resultsOpen)}
 						>
-							<ShieldCheck class="size-3" />
-							<span>Test Result</span>
-						</button>
-						<button
-							type="button"
-							class="flex items-center gap-1.5 px-3 py-1 font-mono text-[11px] tracking-wider uppercase transition-colors {activeRightTab ===
-							'console'
-								? 'border-t-2 border-primary bg-primary font-bold text-primary-foreground'
-								: 'text-muted-foreground hover:text-foreground'}"
-							onclick={() => (activeRightTab = 'console')}
-						>
-							<Terminal class="size-3" />
-							<span>Console</span>
+							{#if resultsOpen}
+								<ChevronDown class="size-4" />
+							{:else}
+								<ChevronUp class="size-4" />
+							{/if}
 						</button>
 					</div>
 
 					<!-- Tab Contents -->
-					<div class="flex-1 overflow-hidden">
+					<div class="flex-1 overflow-hidden {resultsOpen ? '' : 'md:hidden'}">
 						{#if activeRightTab === 'tests'}
-							<TestResultsView results={$testResults} />
-						{:else}
+							<TestResultsView
+								results={$testResults}
+								ratingFeedback={visibleRatingFeedback}
+								nextHref={adjacentQuestions.nextId
+									? resolve('/ide/[id]', { id: adjacentQuestions.nextId })
+									: null}
+							/>
+						{:else if activeRightTab === 'console'}
 							<OutputConsole
 								output={$consoleOutput}
-								onClear={() => pyodideService.consoleOutput.set('')}
+								results={$testResults}
+								hasError={$consoleError}
+								figures={$consoleFigures}
+								onClear={() => {
+									unifiedExecutor.consoleOutput.set('');
+									unifiedExecutor.consoleFigures.set([]);
+								}}
 							/>
+						{:else if content}
+							{#key content.id}
+								<CustomRunPanel
+									functionNames={customFunctionNames}
+									isRunning={$isRunning}
+									output={$consoleOutput}
+									hasError={$consoleError}
+									onRun={handleRunCustom}
+								/>
+							{/key}
 						{/if}
 					</div>
 				</div>
 			</div>
 		</div>
+
+		<IdeStatusBar
+			runtimeState={$runtimeState}
+			runtimeText={runtimeStatusText}
+			language={isSql
+				? 'SQL (SQLite)'
+				: language === 'javascript'
+					? 'JavaScript'
+					: language === 'cpp'
+						? 'C++ (clang 22)'
+						: language === 'go'
+							? 'Go (Yaegi)'
+							: language === 'rust'
+								? 'Rust (rustc-wasm)'
+								: language === 'java'
+									? 'Java (CheerpJ)'
+									: 'Python 3.12'}
+			line={cursorPos.line}
+			col={cursorPos.col}
+			saved={lastSavedAt !== null}
+		/>
 	</div>
 {/if}
 
@@ -534,20 +1094,61 @@
 		.ide-bottom-pane {
 			height: var(--ide-bottom-pane-percent);
 		}
+		.ide-bottom-pane.ide-bottom-collapsed {
+			height: 2.75rem;
+			min-height: 0;
+		}
 	}
 
-	/* The IDE always renders on a black background regardless of the
-	   site's light/dark toggle, so its scrollbars need their own fixed
-	   dark coloring instead of the theme-driven --border/--muted-foreground
-	   the rest of the site uses (which would go near-invisible here in
-	   light mode). */
+	/* The IDE is a workbench: a darker gutter with the guide, editor and
+	   results floating on it as rounded panels. Re-pointing the theme
+	   variables here re-skins every component inside (guide, tests, console)
+	   without touching their classes: panels use --background, panel headers
+	   --secondary, chips --muted, lines --border. */
 	:global(.ide-shell) {
-		scrollbar-color: #333333 transparent;
+		/* Theme tokens (--ide-*) come from the chosen theme as inline style on
+		   the shell (see ide-themes.ts); these fallbacks are Ember. */
+		--ide-gutter: #0d0c0b;
+		--ide-panel: #171513;
+		--ide-head: #1e1b18;
+		--ide-line: #2f2a25;
+		--ide-chip: #28231f;
+		--ide-text: #f2ede6;
+		--ide-text-2: #a99f93;
+		--ide-code: #12100e;
+		--ide-accent: #e0795a;
+		--ide-accent-fg: #1b0b04;
+		--ide-ok: #5fd39a;
+		--ide-ok-fg: #06180d;
+		--ide-bad: #e5786f;
+		--ide-warn: #ffb04a;
+		--ide-sans: 'IBM Plex Sans', var(--font-sans);
+		--ide-mono: 'IBM Plex Mono', var(--font-mono);
+		--background: var(--ide-panel);
+		--secondary: var(--ide-head);
+		--muted: var(--ide-chip);
+		--border: var(--ide-line);
+		--foreground: var(--ide-text);
+		--muted-foreground: var(--ide-text-2);
+		--popover: var(--ide-panel);
+		--popover-foreground: var(--ide-text);
+		--primary: var(--ide-accent);
+		--primary-foreground: var(--ide-accent-fg);
+		background: var(--ide-gutter);
+		color: var(--ide-text);
+		font-family: var(--ide-sans);
+		scrollbar-color: var(--ide-line) transparent;
+	}
+	:global(.ide-shell .font-mono) {
+		font-family: var(--ide-mono);
+	}
+	:global(.ide-shell .font-sans) {
+		font-family: var(--ide-sans);
 	}
 	:global(.ide-shell *)::-webkit-scrollbar-thumb {
-		background-color: #333333;
+		background-color: var(--ide-line);
 	}
 	:global(.ide-shell *)::-webkit-scrollbar-thumb:hover {
-		background-color: #525252;
+		background-color: var(--ide-text-2);
 	}
 </style>

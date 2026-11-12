@@ -9,7 +9,12 @@
 import { SETUP_SCRIPT } from './pyodide-setup-script';
 import { initializePyodide } from './initialize-pyodide';
 import { buildTestRunnerScript } from './build-test-runner-script';
+import { buildCustomRunScript } from './build-custom-run-script';
+import { sanitizeStudentCode } from './sanitize-student-code';
 import { toBase64 } from './to-base64';
+import { ensurePackages } from './ensure-packages';
+import { buildPreviewScript } from './build-preview-script';
+import { buildExternalPrepareScript, buildExternalJudgeScript } from './build-external-scripts';
 
 self.onmessage = async (e: MessageEvent) => {
 	// Origin verification — only trust messages from the same origin as this worker.
@@ -21,7 +26,18 @@ self.onmessage = async (e: MessageEvent) => {
 		return;
 	}
 
-	const { id, action, code, testHarnessCode, contentId, sampleLimit } = e.data;
+	const {
+		id,
+		action,
+		code,
+		testHarnessCode,
+		contentId,
+		sampleLimit,
+		functionName,
+		argumentsJson,
+		expectedJson,
+		previewCode
+	} = e.data;
 
 	try {
 		const py = await initializePyodide();
@@ -32,6 +48,8 @@ self.onmessage = async (e: MessageEvent) => {
 		}
 
 		if (action === 'run') {
+			self.postMessage({ type: 'status', status: 'loading_packages' });
+			await ensurePackages(py, code || '');
 			self.postMessage({ type: 'status', status: 'running' });
 			const startTime = performance.now();
 			const codeB64 = toBase64(code || '');
@@ -74,7 +92,86 @@ json.dumps(__run_user_code())
 			return;
 		}
 
+		if (action === 'preview') {
+			self.postMessage({ type: 'status', status: 'loading_packages' });
+			await ensurePackages(py, code || '', previewCode || '');
+			self.postMessage({ type: 'status', status: 'running' });
+			const startTime = performance.now();
+			const rawResult = await py.runPythonAsync(
+				buildPreviewScript({
+					codeB64: toBase64(sanitizeStudentCode(code || '')),
+					previewB64: toBase64(previewCode || '')
+				})
+			);
+			const parsed = JSON.parse(rawResult);
+			self.postMessage({
+				id,
+				type: 'preview_result',
+				output: parsed.stdout + (parsed.stderr ? '\n[STDERR]\n' + parsed.stderr : ''),
+				error: parsed.error || undefined,
+				figures: parsed.figures || [],
+				durationMs: Math.round(performance.now() - startTime)
+			});
+			self.postMessage({ type: 'status', status: 'ready' });
+			return;
+		}
+
+		if (action === 'custom') {
+			self.postMessage({ type: 'status', status: 'loading_packages' });
+			await ensurePackages(py, code || '', testHarnessCode || '');
+			self.postMessage({ type: 'status', status: 'running' });
+			const startTime = performance.now();
+			const script = buildCustomRunScript({
+				codeB64: toBase64(sanitizeStudentCode(code || '')),
+				testB64: toBase64(testHarnessCode || ''),
+				functionB64: toBase64(functionName || ''),
+				argumentsB64: toBase64(argumentsJson || '[]'),
+				expectedB64: toBase64(expectedJson || '')
+			});
+			const rawResult = await py.runPythonAsync(script);
+			const parsed = JSON.parse(rawResult);
+
+			self.postMessage({
+				id,
+				type: 'run_result',
+				success: Boolean(parsed.success),
+				output: parsed.output || '',
+				error: parsed.error || undefined,
+				durationMs: Math.round(performance.now() - startTime)
+			});
+			self.postMessage({ type: 'status', status: 'ready' });
+			return;
+		}
+
+		// Another language's submission: Python makes the inputs and judges the answers (see external-protocol.ts).
+		if (action === 'external_prepare' || action === 'external_judge') {
+			self.postMessage({ type: 'status', status: 'loading_packages' });
+			await ensurePackages(py, '', testHarnessCode || '');
+			self.postMessage({ type: 'status', status: 'testing' });
+			const testB64 = toBase64(testHarnessCode || '');
+			const limitArg =
+				typeof sampleLimit === 'number' && sampleLimit > 0 ? String(sampleLimit) : '';
+			const script =
+				action === 'external_prepare'
+					? buildExternalPrepareScript({ testB64, limitArg, maxInt: e.data.maxInt || '' })
+					: buildExternalJudgeScript({
+							testB64,
+							limitArg,
+							outputsB64: toBase64(e.data.outputsJson || '{}')
+						});
+			const parsed = JSON.parse(await py.runPythonAsync(script));
+			self.postMessage({
+				id,
+				type: action === 'external_prepare' ? 'external_prepared' : 'external_judged',
+				...parsed
+			});
+			self.postMessage({ type: 'status', status: 'ready' });
+			return;
+		}
+
 		if (action === 'test') {
+			self.postMessage({ type: 'status', status: 'loading_packages' });
+			await ensurePackages(py, code || '', testHarnessCode || '');
 			self.postMessage({ type: 'status', status: 'testing' });
 			const startTime = performance.now();
 			const codeB64 = toBase64(code || '');
@@ -94,7 +191,8 @@ json.dumps(__run_user_code())
 				name: t.name,
 				passed: Boolean(t.passed),
 				durationMs: t.durationMs || 1,
-				error: t.error || undefined
+				error: t.error || undefined,
+				stdout: t.stdout || undefined
 			}));
 
 			const passedCount = testResults.filter((t: any) => t.passed).length;

@@ -1,7 +1,7 @@
 import type { Part } from '$data/questions';
 import { potdEntries, type PotdEntry } from '$data/potd';
 import { parseLocalDateString, toDisplayQuestion } from './to-display-question';
-import { localDateString } from './local-date-string';
+import { istDateString } from './ist-date-string';
 import type { PotdSummary } from './potd-summary';
 
 const FULL_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
@@ -26,30 +26,31 @@ function resolveEntries(entries: PotdEntry[], summaries: PotdSummary[]) {
 	);
 }
 
-// A single Part holding just the entry scheduled for the caller's local
-// calendar date (if any), titled with that actual date -- mirrors
-// getTodaysPotd's own local-time "today", so the hero card and this list
-// entry always agree on what counts as today. Callers on the prerendered
-// static build must only call this client-side (guarded by `browser`),
-// same reason as getTodaysPotd: there's no real visitor "now" at build
-// time.
+// A single Part holding just the entry scheduled for the current IST
+// calendar date (if any), titled plainly -- the date already shows in the
+// hero card above the list and in the row's own date pill, so repeating it
+// in parentheses here was redundant. Mirrors getTodaysPotd's own IST
+// "today", so the hero card and this list entry always agree on what
+// counts as today. Callers on the prerendered static build must only
+// call this client-side (guarded by `browser`), same reason as
+// getTodaysPotd: there's no real visitor "now" at build time.
 export function getTodaysPotdPart(
 	summaries: PotdSummary[],
 	now: Date = new Date(),
 	entries: PotdEntry[] = potdEntries
 ): Part[] {
-	const today = localDateString(now);
+	const today = istDateString(now);
 	const match = resolveEntries(entries, summaries).find((r) => r.entry.date === today);
 	if (!match) return [];
 
 	return [
 		{
 			id: 'potd-today',
-			title: `Today's Problem (${FULL_DATE_FORMAT.format(now)})`,
+			title: "Today's Problem",
 			tracks: [
 				{
 					name: FULL_DATE_FORMAT.format(parseLocalDateString(match.entry.date)),
-					questions: [toDisplayQuestion(match.generated, match.entry.date).question]
+					questions: [toDisplayQuestion(match.generated).question]
 				}
 			]
 		}
@@ -62,10 +63,9 @@ export function getTodaysPotdPart(
 // way getTodaysPotdPart never shows one early), sub-grouped into a Track
 // per exact date it ran (newest first) -- one question per day, so
 // grouping by the full date (rather than by month) puts the date it was
-// featured directly in each section's own header too. Each question's own
-// displayed title also carries its date (see toDisplayQuestion), so the
-// date survives even outside this grouping -- e.g. search/filter results,
-// which flatten tracks together. Reuses ModuleSection/QuestionFilters/
+// featured directly in each track's own centered header. The question rows
+// themselves show just the plain question name (see toDisplayQuestion) --
+// no parenthesized date repeat. Reuses PotdSection/FilterBar/
 // Pagination exactly as the Questions page does. Browser-guarded for the
 // same reason as getTodaysPotdPart: getting "today" wrong at build time
 // would misfile today's (or a future) entry into this list instead of
@@ -75,7 +75,7 @@ export function getPastPotdPart(
 	now: Date = new Date(),
 	entries: PotdEntry[] = potdEntries
 ): Part[] {
-	const today = localDateString(now);
+	const today = istDateString(now);
 	// Lexicographic comparison is correct here: dates are 'YYYY-MM-DD',
 	// which sorts identically to chronological order.
 	const resolved = resolveEntries(entries, summaries).filter((r) => r.entry.date < today);
@@ -88,7 +88,7 @@ export function getPastPotdPart(
 			title: 'Past Problems',
 			tracks: resolved.map((item) => ({
 				name: FULL_DATE_FORMAT.format(parseLocalDateString(item.entry.date)),
-				questions: [toDisplayQuestion(item.generated, item.entry.date).question]
+				questions: [toDisplayQuestion(item.generated).question]
 			}))
 		}
 	];

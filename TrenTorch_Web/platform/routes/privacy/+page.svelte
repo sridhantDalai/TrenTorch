@@ -1,10 +1,11 @@
 <script lang="ts">
+	import SEO from '$components/SEO.svelte';
+	import { withSiteName } from '$processes/seo/with-site-name';
+
 	const LAST_UPDATED = 'September 12, 2026';
 </script>
 
-<svelte:head>
-	<meta name="description" content="Privacy policy for TrenTorch." />
-</svelte:head>
+<SEO title={withSiteName('Privacy')} description="Privacy policy for TrenTorch." path="/privacy" />
 
 <div class="container max-w-3xl px-4 py-12 md:px-6">
 	<h1 class="mb-1 font-mono text-2xl font-bold tracking-tight">Privacy</h1>
@@ -25,14 +26,14 @@
 
 		<h2>What's stored in your browser</h2>
 		<p>
-			The IDE and Questions page remember your progress using <code>localStorage</code>, entirely
+			The IDE and Module page remember your progress using <code>localStorage</code>, entirely
 			client-side:
 		</p>
 		<ul>
 			<li>Which questions you've solved and attempted</li>
 			<li>The code you've written for each question, so it's there when you come back</li>
 			<li>The IDE's pane layout, and your light/dark theme choice</li>
-			<li>Which sections you've collapsed on the Questions page</li>
+			<li>Which sections you've collapsed on the Module page</li>
 		</ul>
 		<p>
 			None of this is sent anywhere. It's tied to your specific browser on your specific device:
@@ -40,6 +41,7 @@
 			resets it. It's also why progress doesn't yet sync across devices, there's no server-side
 			account to sync it through.
 		</p>
+
 		<h2>Signup and community statistics</h2>
 		<p>
 			When you sign up, we store the email address you sign up with. We use the domain part of that
@@ -70,6 +72,11 @@
 			privacy practices. Like any website, the hosting provider serving these pages processes standard
 			web server logs (IP address, user agent, request timestamps) as a normal part of serving the site;
 			we don't use that data for tracking or advertising.
+		</p>
+		<p>
+			Some Problemset exercises are framed as company-inspired scenarios for learning context only.
+			They are not actual interview questions, do not describe a company's internal systems, and do
+			not imply that any named company endorses or is affiliated with TrenTorch.
 		</p>
 
 		<h2>Cookies</h2>

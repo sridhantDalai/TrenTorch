@@ -24,6 +24,21 @@ export async function fetchSolvedQuestions(userId: string): Promise<RemoteSolved
 	return data ?? [];
 }
 
+// Visitors who are not signed in may only read question_id, solved_at and
+// user_id of a public profile's rows (column grants), so selecting is_potd
+// here would be refused.
+export async function fetchPublicSolvedQuestionIds(userId: string): Promise<string[]> {
+	const { data, error } = await getSupabaseClient()
+		.from('solved_questions')
+		.select('question_id')
+		.eq('user_id', userId);
+	if (error) {
+		console.error('Failed to fetch public solved questions from Supabase', error);
+		return [];
+	}
+	return (data ?? []).map((row) => row.question_id);
+}
+
 export async function upsertSolvedQuestion(
 	userId: string,
 	slug: string,
@@ -60,4 +75,18 @@ export async function deleteSolvedQuestion(userId: string, slug: string): Promis
 		.eq('user_id', userId)
 		.eq('question_id', slug);
 	if (error) console.error('Failed to delete solved question from Supabase', error);
+}
+
+// When each question was first solved, for the account page's contribution graph.
+export async function fetchSolvedDates(userId: string): Promise<string[] | null> {
+	const { data, error } = await getSupabaseClient()
+		.from('solved_questions')
+		.select('solved_at')
+		.eq('user_id', userId)
+		.abortSignal(AbortSignal.timeout(15_000));
+	if (error) {
+		console.error('Failed to fetch solve dates', error);
+		return null;
+	}
+	return (data ?? []).flatMap((row) => (row.solved_at ? [row.solved_at as string] : []));
 }

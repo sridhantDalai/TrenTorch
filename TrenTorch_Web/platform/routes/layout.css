@@ -2,13 +2,14 @@
 @plugin '@tailwindcss/typography';
 
 /* Self-hosted, latin-subset variable fonts (one file per family covers
-   every weight). Imported through Vite from platform/fonts so each gets a
-   content-hashed name under /_app/immutable and a 1-year immutable
+   every weight): Inter for prose/UI and Geist Mono for the monospace
+   wordmark and code. Imported through Vite from platform/fonts so each
+   gets a content-hashed name under /_app/immutable and a 1-year immutable
    Cache-Control -- fetched once per browser, then zero egress on every
    later visit. `swap` so text shows immediately in the fallback. */
 @font-face {
-	font-family: 'Geist';
-	src: url('../fonts/geist-latin.woff2') format('woff2');
+	font-family: 'Inter';
+	src: url('../fonts/inter-latin.woff2') format('woff2');
 	font-weight: 100 900;
 	font-display: swap;
 }
@@ -19,12 +20,48 @@
 	font-display: swap;
 }
 
+/* The IDE is set in IBM Plex: Plex Sans for reading, Plex Mono for code. Plex was
+   drawn for technical documentation: sturdy, a little squared, with clear 0/O
+   and 1/l in the mono. Geist Mono stays the site's wordmark; Inter stays the
+   rest of the site. */
+@font-face {
+	font-family: 'IBM Plex Sans';
+	src: url('../fonts/ibm-plex-sans-latin.woff2') format('woff2');
+	font-weight: 100 700;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	src: url('../fonts/ibm-plex-mono-latin-400.woff2') format('woff2');
+	font-weight: 400;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	src: url('../fonts/ibm-plex-mono-latin-500.woff2') format('woff2');
+	font-weight: 500;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	src: url('../fonts/ibm-plex-mono-latin-600.woff2') format('woff2');
+	font-weight: 600;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	src: url('../fonts/ibm-plex-mono-latin-400-italic.woff2') format('woff2');
+	font-weight: 400;
+	font-style: italic;
+	font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);
-	--font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
+	--font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
 	--font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
 	--color-border: var(--border);
 	--color-input: var(--input);
@@ -46,10 +83,14 @@
 }
 
 :root {
-	--radius: 0.125rem;
+	/* Squircle corners everywhere: --radius-sm/md/lg derive from this via
+	 * calc(--radius - 4px/2px), so the old 0.125rem (2px) made rounded-md
+	 * compute to 0px -- literal square corners on buttons, inputs and cards.
+	 * 0.75rem resolves to sm=8px, md=10px, lg=12px. */
+	--radius: 0.75rem;
 	--background: #faf9f6;
-	--foreground: #171717;
-	--primary: #cc4021;
+	--foreground: #0a0a0a;
+	--primary: #dc1414e0;
 	--primary-foreground: #ffffff;
 	--secondary: #fafafa;
 	--secondary-foreground: #171717;
@@ -60,22 +101,21 @@
 	--destructive: #e5484d;
 	--border: #eaeaea;
 	--input: #eaeaea;
-	--ring: #cc4021;
-	--grid-line: rgb(0 0 0 / 4%);
+	--ring: #a23a38;
 	--popover: #ffffff;
 	--popover-foreground: #171717;
 }
 
 .dark {
-	--background: #000000;
-	--foreground: #ededed;
+	--background: #0a0a0a;
+	--foreground: #faf9f6;
 	/* Warm red-orange brand accent (a shade off CSS "orangered"): the one
 	 * spot of color in an otherwise black/white/gray system, spent on
 	 * primary CTAs, the brand mark, stat numbers, and in-progress state --
 	 * kept a distinct hue from --destructive (a cooler, pinker red) so
 	 * "this is the brand" and "this is an error" never read as the same
 	 * signal. */
-	--primary: #e8543a;
+	--primary: #a01e1e;
 	--primary-foreground: #ffffff;
 	--secondary: #161616;
 	--secondary-foreground: #ededed;
@@ -86,9 +126,8 @@
 	--destructive: #ff6166;
 	--border: #262626;
 	--input: #262626;
-	--ring: #e8543a;
-	--grid-line: rgb(255 255 255 / 6%);
-	--popover: #0a0a0a;
+	--ring: #a23a38;
+	--popover: #161616;
 	--popover-foreground: #ededed;
 }
 
@@ -119,20 +158,86 @@
 	}
 	body {
 		@apply bg-background text-foreground;
-		background-image:
-			linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
-			linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
-		background-size: 48px 48px;
-		/* 56px = the navbar's own height (h-14), so a horizontal grid line
-		 * lands exactly on the navbar's bottom border instead of drifting
-		 * from it: both are fixed to the viewport (sticky header, fixed
-		 * background), so this stays aligned on scroll too. */
-		background-position: center 56px;
-		background-attachment: fixed;
+	}
+	html {
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
+	/* Headings break into even lines and paragraphs avoid a one-word last line. */
+	:where(h1, h2, h3) {
+		text-wrap: balance;
+	}
+	:where(p) {
+		text-wrap: pretty;
+	}
+	/* One keyboard focus ring for everything that has no ring of its own. */
+	:where(
+		a,
+		button,
+		summary,
+		select,
+		[role='button'],
+		[role='tab'],
+		[role='menuitem']
+	):focus-visible {
+		outline: 2px solid color-mix(in oklab, var(--foreground) 70%, transparent);
+		outline-offset: 2px;
+	}
+	::selection {
+		background: color-mix(in oklab, var(--foreground) 22%, transparent);
+	}
+	:where(button, [role='button'], [role='tab'], select) {
+		-webkit-tap-highlight-color: transparent;
+		touch-action: manipulation;
+	}
+	/* Anyone who asks the system for less motion gets none, except spinners
+	 * that say "working". */
+	@media (prefers-reduced-motion: reduce) {
+		*:not(.animate-spin),
+		*:not(.animate-spin)::before,
+		*:not(.animate-spin)::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+			scroll-behavior: auto !important;
+		}
 	}
 }
 
 @layer components {
+	/* The faint dot grid the home page has behind its hero, for other pages' headers: dots that follow the
+	 * theme, fading out toward the edges. Put it on the header's wrapper; the content sits above it. */
+	.dot-texture {
+		position: relative;
+		isolation: isolate;
+	}
+	.dot-texture::before {
+		content: '';
+		position: absolute;
+		inset: -2rem -1rem -1rem -1rem;
+		z-index: -1;
+		pointer-events: none;
+		background-image: radial-gradient(currentColor 1px, transparent 1px);
+		background-size: 22px 22px;
+		color: var(--border);
+		opacity: 0.55;
+		mask-image: radial-gradient(ellipse 75% 90% at 20% 20%, black, transparent 80%);
+		-webkit-mask-image: radial-gradient(ellipse 75% 90% at 20% 20%, black, transparent 80%);
+	}
+
+	/* Press feedback for buttons: a quick ease-out dip on press, a snappier
+	 * release, and only the properties that change are transitioned. */
+	.press {
+		transition-property: transform, background-color, border-color, color, opacity;
+		transition-duration: 150ms;
+		transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+	}
+	.press:not(:disabled):active {
+		transform: scale(0.97);
+		transition-duration: 90ms;
+	}
+
 	/* One place for the rendered-markdown look in the IDE guide pane
 	 * (Description / Theory / Solution explanation), instead of the same
 	 * ~20-utility `prose ...` string repeated on every tab. Tweaks on top
@@ -163,7 +268,7 @@
 		padding-inline-start: 0.35em;
 	}
 	.question-prose :where(:not(pre) > code) {
-		border-radius: 0.25rem;
+		border-radius: 0.375rem;
 		border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
 		background: var(--muted);
 		padding: 0.1em 0.35em;
@@ -181,6 +286,7 @@
 		 * slightly-more-contrasted of the two neutral surface tokens) make
 		 * the block actually read as a distinct box in both themes. */
 		border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+		border-radius: 0.5rem;
 		background: var(--muted);
 		color: var(--foreground);
 		font-family: var(--font-mono);
@@ -192,7 +298,7 @@
 	.question-prose :where(details) {
 		margin-block: 0.6em;
 		border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
-		border-radius: 0.375rem;
+		border-radius: 0.5rem;
 		background: var(--muted);
 		padding: 0.55em 0.9em;
 	}
@@ -214,6 +320,9 @@
 }
 
 @layer utilities {
+	.font-signature {
+		font-family: 'Caveat', cursive;
+	}
 	/* The navbar and footer bars themselves span the full viewport width
 	 * (no wrapper caps them anymore); this class centers each bar's and
 	 * each page section's actual content within a readable max-width, so

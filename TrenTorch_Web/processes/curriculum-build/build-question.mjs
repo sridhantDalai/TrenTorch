@@ -1,15 +1,13 @@
 import { join } from 'node:path';
 import { readIfExists } from './read-if-exists.mjs';
 import { parseReadme } from './parse-readme.mjs';
+import { buildCasesTests, parseProblem } from './build-cases-tests.mjs';
 
-export function buildQuestion(
-	sectionId,
-	trackId,
-	sectionDirName,
-	trackDirName,
-	questionDirName,
-	questionDirPath
-) {
+// The file extension of a DSA question's solution in each language besides Python.
+const SOLUTION_EXTENSIONS = { javascript: 'js', cpp: 'cpp', java: 'java', go: 'go', rust: 'rs' };
+
+export function buildQuestion(parent, trackId, questionDirName, questionDirPath) {
+	const { rootId, sectionId, hasTheory, trackTheory } = parent;
 	const readmeRaw = readIfExists(join(questionDirPath, 'README.md'));
 	if (readmeRaw === null) {
 		throw new Error(`Missing README.md in ${questionDirPath}`);
@@ -19,12 +17,51 @@ export function buildQuestion(
 		questionDirPath
 	);
 
+	let relatedModule;
+	if (meta.kind === 'problemset') {
+		if (typeof meta.relatedModule !== 'string') {
+			throw new Error(
+				`Problemset question in ${questionDirPath} is missing relatedModule metadata`
+			);
+		}
+		const moduleParts = meta.relatedModule.split('|');
+		if (moduleParts.length !== 2 || moduleParts.some((part) => !part.trim())) {
+			throw new Error(
+				`Problemset question in ${questionDirPath} must use relatedModule: partId|topicTag`
+			);
+		}
+		relatedModule = { partId: moduleParts[0].trim(), topicTag: moduleParts[1].trim() };
+		if (typeof meta.caseCompany === 'string' && !meta.caseCompany.trim()) {
+			throw new Error(`Problemset question in ${questionDirPath} has an empty caseCompany`);
+		}
+	}
+
+	// Optional: further reading for a DSA question, [{ title, url }], shown under its keywords.
+	const referencesJson = readIfExists(join(questionDirPath, 'references.json'));
+	const references =
+		referencesJson !== null ? parseReferences(referencesJson, questionDirPath) : [];
+
 	const solution = readIfExists(join(questionDirPath, 'solution.py'));
-	const tests = readIfExists(join(questionDirPath, 'tests.py'));
+	// DSA sheet: the same solution in the other languages the IDE can run (solution.js, .cpp, ...).
+	const languageSolutions = {};
+	for (const [language, extension] of Object.entries(SOLUTION_EXTENSIONS)) {
+		const code = readIfExists(join(questionDirPath, `solution.${extension}`));
+		if (code !== null) languageSolutions[language] = code;
+	}
+	// A DSA question keeps its tests in problem.json (language-neutral cases); the Python tests
+	// are generated from it. Every other question has a hand-written tests.py.
+	const problemJson = readIfExists(join(questionDirPath, 'problem.json'));
+	const parsedProblem = problemJson !== null ? parseProblem(problemJson, questionDirPath) : null;
+	const tests =
+		problemJson !== null
+			? buildCasesTests(problemJson, questionDirPath)
+			: readIfExists(join(questionDirPath, 'tests.py'));
 	// Optional for now: not every question has a hand-authored student
 	// stub yet. Tracks without it just won't have starterCode in the
 	// output until one is added -- not a build failure.
 	const starter = readIfExists(join(questionDirPath, 'starter.py'));
+	// Optional: Python that runs after the student's code on Run, to draw an example.
+	const preview = readIfExists(join(questionDirPath, 'preview.py'));
 
 	for (const [fieldName, value] of Object.entries({ solution, tests })) {
 		if (value === null) {
@@ -34,39 +71,74 @@ export function buildQuestion(
 		}
 	}
 
+	// DSA sheet: where the "Go to Theory" link points. The question's own `theory:` (a heading
+	// anchor on the step's theory page) wins over the topic's default from its meta.json.
+	const theoryAnchor =
+		typeof meta.theory === 'string'
+			? meta.theory
+			: typeof trackTheory === 'string'
+				? trackTheory
+				: null;
+	const theory =
+		hasTheory && theoryAnchor !== null ? { step: sectionId, anchor: theoryAnchor } : null;
+
 	return {
 		id: meta.name,
 		title: meta.title,
 		tags: meta.tags,
 		difficulty: meta.difficulty,
+		root: rootId,
+		...(meta.kind === 'problemset' || meta.kind === 'potd' ? { kind: meta.kind } : {}),
+		...(parsedProblem !== null
+			? { kind: 'dsa', hints: parsedProblem.hints, signature: parsedProblem.signature }
+			: {}),
+		...(references.length > 0 ? { references } : {}),
+		...(theory && problemJson !== null ? { theory } : {}),
+		...(typeof meta.caseCompany === 'string' ? { caseCompany: meta.caseCompany } : {}),
+		...(relatedModule ? { relatedModule } : {}),
+		...(typeof meta.hint === 'string' ? { hint: meta.hint } : {}),
+		...(Array.isArray(meta.tools) ? { tools: meta.tools } : {}),
+		...(typeof meta.topic === 'string' ? { topic: meta.topic } : {}),
 		section: sectionId,
 		track: trackId,
-		// The raw, numeric-prefixed on-disk directory names -- distinct from
-		// `section`/`track` (the prefix-stripped semantic ids above). A
-		// load_solution("01-classical-ml/03-decision-trees/03-best-split-
-		// minimal-tree") call in some OTHER question's solution.py/tests.py
-		// addresses a dependency by this exact three-segment raw path (see
-		// data/app_data/_load.py's own docstring: paths are deliberately
-		// section/track/folder-qualified so no two tracks' "01-..." folders
-		// can ever collide). The browser-side dependency resolution needs
-		// these same raw segments to reproduce that lookup faithfully --
-		// resolving by bare folder name alone breaks the moment a
-		// dependency lives in a different track than the question asking
-		// for it.
-		sectionFolder: sectionDirName,
-		trackFolder: trackDirName,
-		// The raw "NN-question-slug" folder name, distinct from `id`
-		// (README.md frontmatter's `name`) -- kept so the app can resolve a
-		// track-mate's tests.py calling load_solution("01-hypothesis-function")
-		// back to a question id without guessing at a naming convention
-		// between the two.
-		folder: questionDirName,
 		order: Number(questionDirName.split('-')[0]),
 		statementMarkdown,
 		theoryMarkdown,
 		starterCode: starter,
+		...(preview !== null ? { previewCode: preview } : {}),
 		oracleSolutionCode: solution,
+		...(Object.keys(languageSolutions).length > 0 ? { languageSolutions } : {}),
 		oracleExplanationMarkdown: explanationMarkdown,
-		testsCode: tests
+		testsCode: tests,
+		// Optional: an id naming a client-side interactive widget (see
+		// platform/widgets/) to mount inside the Theory tab, for questions
+		// where a slider-driven canvas genuinely clarifies the idea. Most
+		// questions have none.
+		...(typeof meta.widget === 'string' ? { widgetId: meta.widget } : {})
 	};
+}
+
+/**
+ * @param {string} raw
+ * @param {string} questionDirPath
+ * @returns {{ title: string, url: string }[]}
+ */
+function parseReferences(raw, questionDirPath) {
+	const list = JSON.parse(raw);
+	if (!Array.isArray(list) || list.length > 6) {
+		throw new Error(`references.json in ${questionDirPath} must be a list of at most 6 links`);
+	}
+	for (const item of list) {
+		if (
+			typeof item?.title !== 'string' ||
+			!item.title.trim() ||
+			typeof item?.url !== 'string' ||
+			!/^https:\/\/[^\s]+$/.test(item.url)
+		) {
+			throw new Error(
+				`references.json in ${questionDirPath}: each link needs a title and an https url`
+			);
+		}
+	}
+	return list.map((item) => ({ title: item.title.trim(), url: item.url }));
 }

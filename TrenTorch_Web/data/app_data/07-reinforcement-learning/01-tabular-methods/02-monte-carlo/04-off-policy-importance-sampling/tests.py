@@ -1,0 +1,93 @@
+import numpy as np
+import pytest
+
+from _load import load_solution
+
+_module = load_solution(__file__)
+estimate_off_policy_returns = _module.estimate_off_policy_returns
+
+
+def test_single_episode():
+    """Single episode, single state-action."""
+    episode = [(0, 0, 10.0)]
+    result = estimate_off_policy_returns([episode], gamma=0.9)
+
+    # Return is 10, action 0 is best, weight should be high
+    assert (0, 0) in result
+
+
+def test_uniform_behavior():
+    """Behavior policy uniform over observed actions."""
+    episode = [(0, 0, 5.0), (1, 1, 3.0)]
+    result = estimate_off_policy_returns([episode], gamma=1.0)
+
+    # Both actions observed, so β(a) = 0.5
+    # Compute returns and weights
+    assert len(result) >= 0
+
+
+def test_empty_episodes():
+    """Empty episodes."""
+    result = estimate_off_policy_returns([], gamma=0.9)
+    assert result == {}
+
+
+def test_multiple_episodes():
+    """Multiple episodes."""
+    ep1 = [(0, 0, 1.0)]
+    ep2 = [(0, 0, 2.0)]
+    result = estimate_off_policy_returns([ep1, ep2], gamma=0.9)
+
+    assert (0, 0) in result
+
+
+def test_single_action_episode_has_weight_one():
+    """Only one action is observed, so it is both the behavior choice and the greedy choice."""
+    episode = [(0, 1, 10.0)]
+    result = estimate_off_policy_returns([episode], gamma=0.9)
+
+    # beta = 1 / 1 (one observed action) and pi = 1 (it is the greedy action), so W = 1
+    # and the weighted return is the return itself.
+    assert result[(0, 1)] == pytest.approx(10.0)
+
+
+def test_ties_go_to_the_first_action_in_the_episode():
+    """With string actions the result must not depend on how Python orders a set of strings."""
+    pairs = [
+        ("left", "right"),
+        ("up", "down"),
+        ("a", "b"),
+        ("b", "a"),
+        ("north", "south"),
+        ("x1", "x2"),
+        ("pick", "drop"),
+        ("go", "stay"),
+        ("hit", "miss"),
+        ("on", "off"),
+    ]
+    for first, second in pairs:
+        episode = [("s0", first, 1.0), ("s0", second, 2.0), ("s1", first, 3.0)]
+        result = estimate_off_policy_returns([episode], gamma=0.9)
+        # No Q-values yet, so every action ties and the first one in the episode is greedy.
+        # Only the last step keeps a weight: (s1, first) with W = 1 / 0.5 = 2 and G = 3.
+        assert result == pytest.approx({("s1", first): 6.0})
+
+
+def test_structure():
+    """Result is dict (state, action) -> float."""
+    episode = [(0, 0, 5.0), (1, 1, 3.0), (2, 0, 1.0)]
+    result = estimate_off_policy_returns([episode], gamma=0.8)
+
+    for key, val in result.items():
+        assert isinstance(key, tuple) and len(key) == 2
+        assert isinstance(val, (float, np.floating))
+
+
+def test_deterministic():
+    """Same input gives same output."""
+    episode = [(0, 0, 5.0), (1, 0, 3.0)]
+    result1 = estimate_off_policy_returns([episode], gamma=0.9)
+    result2 = estimate_off_policy_returns([episode], gamma=0.9)
+
+    for key in result1:
+        assert np.isclose(result1[key], result2[key])

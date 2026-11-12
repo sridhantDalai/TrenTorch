@@ -11,3 +11,31 @@
 # artifact, not project content, and unrelated to whatever lives inside
 # TrenTorch_CLI/ or any future sibling directory.
 .claude/
+
+# Dependencies and build outputs
+node_modules/
+.output/
+.vercel/
+.netlify/
+.wrangler/
+/.svelte-kit/
+/build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/

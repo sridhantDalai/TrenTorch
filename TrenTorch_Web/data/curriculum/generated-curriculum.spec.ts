@@ -1,8 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import generated from './generated-curriculum.json';
+import { curriculum as generated } from 'virtual:curriculum/bundle';
 
-const questions = generated.sections.flatMap((section) =>
-	section.tracks.flatMap((track) => track.questions)
+const questionsOf = (roots: typeof generated.roots) =>
+	roots.flatMap((root) =>
+		root.sections.flatMap((section) => section.tracks.flatMap((track) => track.questions))
+	);
+const questions = questionsOf(generated.roots);
+// DSA sheet questions keep their theory on a per-step page, not in the question itself.
+const dsaSheetIds = new Set(
+	questionsOf(generated.roots.filter((r) => r.id === 'dsa-sheet')).map((q) => q.id)
 );
 
 describe('generated curriculum bundle', () => {
@@ -15,13 +21,22 @@ describe('generated curriculum bundle', () => {
 		const incomplete = questions.filter(
 			(q) =>
 				!q.statementMarkdown.trim() ||
-				!q.theoryMarkdown.trim() ||
-				!q.starterCode.trim() ||
+				(!q.theoryMarkdown.trim() && !dsaSheetIds.has(q.id)) ||
+				!q.starterCode?.trim() ||
 				!q.oracleSolutionCode.trim() ||
 				!q.oracleExplanationMarkdown.trim() ||
 				!q.testsCode.trim()
 		);
 		expect(incomplete.map((q) => q.id)).toEqual([]);
+	});
+
+	it('every extra-language solution is non-empty', () => {
+		const bad = questions.filter(
+			(q) =>
+				q.languageSolutions &&
+				Object.values(q.languageSolutions).some((code) => !code?.trim())
+		);
+		expect(bad.map((q) => q.id)).toEqual([]);
 	});
 
 	it('every difficulty is one the UI knows how to badge', () => {

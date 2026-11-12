@@ -14,7 +14,8 @@ const summary: PotdSummary = {
 	title: 'One',
 	difficulty: 'Beginner',
 	tags: ['classical-ml'],
-	section: 'classical-ml',
+	root: 'classical-ml',
+	section: 'supervised-models',
 	track: 'linear-models'
 };
 
@@ -31,9 +32,7 @@ describe('POTD date labels', () => {
 		const entry = { date: '2026-09-14', questionId: summary.id };
 		expect(new Date(entry.date).getDate()).toBe(13);
 		expect(display.parseLocalDateString(entry.date).getDate()).toBe(14);
-		expect(display.toDisplayQuestion(summary, entry.date).question.title).toContain(
-			'(September 14, 2026)'
-		);
+		expect(display.toDisplayQuestion(summary).question.title).toBe('One');
 
 		const today = getTodaysPotdPart([summary], new Date(2026, 8, 14, 12), [entry]);
 		expect(today[0].tracks[0].name).toBe('September 14, 2026');

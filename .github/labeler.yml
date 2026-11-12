@@ -8,6 +8,7 @@ documentation:
   - changed-files:
       - any-glob-to-any-file:
           - 'README.md'
+          - 'docs/**'
           - 'TrenTorch_CLI/docs/**'
           - 'TrenTorch_Web/docs/**'
 
@@ -37,11 +38,11 @@ milestones:
 
 ui:
   - changed-files:
-      - any-glob-to-any-file: 'TrenTorch_Web/src/routes/**'
+      - any-glob-to-any-file: 'src/routes/**'
 
 lib:
   - changed-files:
-      - any-glob-to-any-file: 'TrenTorch_Web/src/lib/**'
+      - any-glob-to-any-file: 'src/lib/**'
 
 tests:
   - changed-files:
@@ -55,6 +56,8 @@ tests:
 dependencies:
   - changed-files:
       - any-glob-to-any-file:
+          - 'package.json'
+          - 'package-lock.json'
           - 'TrenTorch_CLI/pyproject.toml'
           - 'TrenTorch_CLI/requirements.txt'
           - 'TrenTorch_CLI/settings.ini'
