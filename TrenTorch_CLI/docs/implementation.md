@@ -137,12 +137,12 @@ The two compartments described in [`cli_file_organization.md`](cli_file_organiza
 |---|---|
 | `config.py` | `CLIConfig`, resolved project paths. Auto-detects the project root by walking up the directory tree looking for `pyproject.toml`, and includes a one-time migration of the legacy `.tren/`/`.tito/` progress directories to `user_data/`. |
 | `console.py` | A shared Rich `Console` singleton plus banner, logo, error, success, warning, and info print helpers used across the whole CLI. |
-| `exceptions.py` | A small exception hierarchy: `TrenTorchCLIError` (base), `ValidationError`, `ExecutionError`, `EnvironmentError`, `ModuleNotFoundError`. |
+| `exceptions.py` | The CLI's single exception type, `TrenTorchCLIError`, which `BaseCommand.execute()` catches and formats consistently. |
 | `modules.py` | Module auto-discovery and metadata parsing, described in section 1.4. |
 | `runtime.py` | Distinguishes `is_ci()` from `is_interactive()` as two explicitly separate checks. See "Project history" in the design doc for why this distinction matters. |
 | `status_analyzer.py` | `TrenTorchStatusAnalyzer`, a heavier per-module compliance and health checker (checks for required sections, parses class and function counts, tries importing and running the module) used by dashboards and preflight checks. |
 | `theme.py` | Centralized Rich color and style constants for consistent CLI theming. |
-| `virtual_env_manager.py` | Resolves the virtual environment path and the correct binary directory for the current OS. |
+| `virtual_env_manager.py` | Resolves the virtual environment path and the correct binary directory for the current OS, and owns `is_venv_active()`, the one check for whether the running interpreter is a venv's. Every caller that needs that answer (the CLI guard, `validate()`, health, info, the TUI, the server, the status analyzer) uses it rather than its own copy. |
 
 ### 2.4 What `tren module test <NN>` actually runs
 

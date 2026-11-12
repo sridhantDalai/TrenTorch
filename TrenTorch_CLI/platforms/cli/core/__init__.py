@@ -4,7 +4,7 @@ Core CLI functionality and shared utilities.
 
 from .config import CLIConfig
 from .console import get_console
-from .exceptions import ExecutionError, TrenTorchCLIError, ValidationError
+from .exceptions import TrenTorchCLIError
 from .modules import (
     clear_cache,
     get_module_display_name,
@@ -15,12 +15,11 @@ from .modules import (
     module_exists,
     normalize_module_number,
 )
+from .text import pluralize
 
 __all__ = [
     "get_console",
     "TrenTorchCLIError",
-    "ValidationError",
-    "ExecutionError",
     "CLIConfig",
     # Module utilities
     "get_module_mapping",
@@ -31,4 +30,6 @@ __all__ = [
     "get_total_modules",
     "module_exists",
     "clear_cache",
+    # Text utilities
+    "pluralize",
 ]

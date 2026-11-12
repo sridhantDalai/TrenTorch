@@ -37,6 +37,8 @@ from platforms.cli.core.modules import (
     get_module_name,
     normalize_module_number,
 )
+from platforms.cli.core.state_schema import validate_progress
+from platforms.cli.core.virtual_env_manager import is_venv_active
 from platforms.cli.processes.milestone.constants import MILESTONE_SCRIPTS
 
 MODULE_STAGES = {
@@ -230,7 +232,12 @@ class TrenTorchRequestHandler(SimpleHTTPRequestHandler):
         # terminal); console=None makes read_json_or_warn print straight
         # to stderr instead, which lands in the same place `tren serve`'s
         # own request log already goes.
-        return read_json_or_warn(p_file, default, label="Your saved progress")
+        return read_json_or_warn(
+            p_file,
+            default,
+            label="Your saved progress",
+            validate=validate_progress,
+        )
 
     def _send_json(self, data: Any, status: HTTPStatus = HTTPStatus.OK):
         """Helper to send JSON response."""
@@ -251,7 +258,7 @@ class TrenTorchRequestHandler(SimpleHTTPRequestHandler):
         started = progress.get("started_modules", [])
         total_modules = len(self._all_module_numbers())
 
-        in_venv = sys.prefix != sys.base_prefix or os.environ.get("VIRTUAL_ENV") is not None
+        in_venv = is_venv_active()
         tp_path = self.config.project_root / "data" / "trentorch"
 
         data = {

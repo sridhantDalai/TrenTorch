@@ -17,6 +17,7 @@ from platforms.cli.commands.base import BaseCommand
 from platforms.cli.commands.export_utils import convert_py_to_notebook
 from platforms.cli.core.atomic_io import atomic_write_json, read_json_or_warn
 from platforms.cli.core.modules import get_module_mapping, normalize_module_number
+from platforms.cli.core.state_schema import validate_progress
 
 
 class ModuleResetCommand(BaseCommand):
@@ -209,26 +210,39 @@ class ModuleResetCommand(BaseCommand):
         progress_file = user_data_dir / "progress.json"
 
         if progress_file.exists():
-            progress = read_json_or_warn(progress_file, {}, console=console, label="Your saved progress")
+            progress = read_json_or_warn(
+                progress_file,
+                {},
+                console=console,
+                label="Your saved progress",
+                validate=validate_progress,
+            )
+        else:
+            progress = {
+                "version": "1.0",
+                "started_modules": [],
+                "completed_modules": [],
+                "last_worked": None,
+            }
 
-            # Remove from completed and started modules
-            if "completed_modules" in progress:
-                if module_number in progress["completed_modules"]:
-                    progress["completed_modules"].remove(module_number)
+        # Remove from completed and started modules
+        if "completed_modules" in progress:
+            if module_number in progress["completed_modules"]:
+                progress["completed_modules"].remove(module_number)
 
-            if "started_modules" in progress:
-                if module_number in progress["started_modules"]:
-                    progress["started_modules"].remove(module_number)
+        if "started_modules" in progress:
+            if module_number in progress["started_modules"]:
+                progress["started_modules"].remove(module_number)
 
-            progress["last_updated"] = datetime.now().isoformat()
+        progress["last_updated"] = datetime.now().isoformat()
 
-            try:
-                atomic_write_json(progress_file, progress)
-            except OSError as e:
-                console.print(
-                    f"[yellow]⚠️  Could not save progress.json: {e}[/yellow]\n"
-                    f"    Module {module_number} may still show as completed until this is fixed."
-                )
+        try:
+            atomic_write_json(progress_file, progress)
+        except OSError as e:
+            console.print(
+                f"[yellow]⚠️  Could not save progress.json: {e}[/yellow]\n"
+                f"    Module {module_number} may still show as completed until this is fixed."
+            )
 
     def _clear_all_progress(self) -> None:
         """Clear all progress tracking in user_data/ directory."""

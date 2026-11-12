@@ -3,7 +3,6 @@ Info command for TrenTorch CLI: shows system and environment information.
 """
 
 import json as json_module
-import os
 import platform
 import shutil
 import sys
@@ -14,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from platforms.cli.commands.base import BaseCommand
+from platforms.cli.core.virtual_env_manager import is_venv_active
 
 
 def _gather_system_info(venv_path: Path) -> dict:
@@ -27,11 +27,7 @@ def _gather_system_info(venv_path: Path) -> dict:
     machine = platform.machine()
 
     # Virtual Environment
-    in_venv = (
-        os.environ.get("VIRTUAL_ENV") is not None
-        or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
-        or hasattr(sys, "real_prefix")
-    )
+    in_venv = is_venv_active()
 
     # TrenTorch Version
     try:
@@ -107,7 +103,10 @@ class InfoCommand(BaseCommand):
 
         if venv_exists and in_venv:
             venv_status = "✅ OK"
-            venv_path_str = os.environ.get("VIRTUAL_ENV", str(self.venv_path))
+            # sys.prefix is the venv this Python actually runs from;
+            # VIRTUAL_ENV can be unset (venv run without activating) or
+            # stale (left over from another project).
+            venv_path_str = sys.prefix
         elif venv_exists:
             venv_status = "⚠️  Not Activated"
             venv_path_str = str(self.venv_path)

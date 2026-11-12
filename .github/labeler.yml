@@ -1,16 +1,40 @@
 # Config for actions/labeler (auto-label-prs.yml). Maps changed file
-# globs to labels, adapted from TrenTorch/TrenTorch's own labeler.yml for
-# this repo's SvelteKit layout instead of the Python CLI/curriculum one.
+# globs to labels -- reuses existing labels (documentation, dependencies,
+# github_actions) where one already fit, and adds ones specific to each
+# side of the monorepo (cli/dev-tools/curriculum/milestones/security for
+# TrenTorch_CLI, ui/lib for TrenTorch_Web).
 
 documentation:
   - changed-files:
       - any-glob-to-any-file:
           - 'README.md'
           - 'docs/**'
+          - 'TrenTorch_CLI/docs/**'
+          - 'TrenTorch_Web/docs/**'
 
 github_actions:
   - changed-files:
       - any-glob-to-any-file: '.github/**'
+
+cli:
+  - changed-files:
+      - any-glob-to-any-file: 'TrenTorch_CLI/platforms/cli/**'
+
+dev-tools:
+  - changed-files:
+      - any-glob-to-any-file: 'TrenTorch_CLI/platforms/dev_tools/**'
+
+curriculum:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'TrenTorch_CLI/data/src/**'
+          - 'TrenTorch_CLI/data/modules/**'
+          - 'TrenTorch_CLI/data/solutions/**'
+          - 'TrenTorch_Web/data/app_data/**'
+
+milestones:
+  - changed-files:
+      - any-glob-to-any-file: 'TrenTorch_CLI/data/milestones/**'
 
 ui:
   - changed-files:
@@ -23,6 +47,9 @@ lib:
 tests:
   - changed-files:
       - any-glob-to-any-file:
+          - 'TrenTorch_CLI/tests/**'
+          - 'TrenTorch_CLI/platforms/cli/tests/**'
+          - 'TrenTorch_CLI/data/milestones/tests/**'
           - '**/*.spec.ts'
           - '**/*.test.ts'
 
@@ -31,3 +58,14 @@ dependencies:
       - any-glob-to-any-file:
           - 'package.json'
           - 'package-lock.json'
+          - 'TrenTorch_CLI/pyproject.toml'
+          - 'TrenTorch_CLI/requirements.txt'
+          - 'TrenTorch_CLI/settings.ini'
+          - 'TrenTorch_Web/package.json'
+          - 'TrenTorch_Web/package-lock.json'
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'TrenTorch_CLI/platforms/cli/server/**'
+          - 'TrenTorch_Web/supabase/**'

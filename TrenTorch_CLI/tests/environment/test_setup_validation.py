@@ -7,18 +7,16 @@ ensure students can actually use TrenTorch.
 
 Usage:
     pytest tests/environment/test_setup_validation.py -v
-
-    Or via TREN:
-    tren system health --verify
 """
 
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from platforms.cli.core.virtual_env_manager import is_venv_active
 
 
 class TestPythonEnvironment:
@@ -33,12 +31,8 @@ class TestPythonEnvironment:
 
     def test_virtual_environment_active(self):
         """Virtual environment should be active."""
-        # Check if we're in a virtual environment
-        in_venv = (
-            os.environ.get("VIRTUAL_ENV") is not None
-            or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
-            or hasattr(sys, "real_prefix")
-        )
+        # Same check the tren guard uses, so this test can't drift from it.
+        in_venv = is_venv_active()
 
         if not in_venv:
             print("⚠️  Virtual environment not active (optional but recommended)")
@@ -417,7 +411,8 @@ def run_all_validation_tests():
     """
     Run all validation tests and provide a summary.
 
-    This is called by `tren system health --verify` to ensure
+    Called when this file is run directly
+    (`python tests/environment/test_setup_validation.py`) to ensure
     the environment is correctly configured.
     """
     import pytest
@@ -436,7 +431,7 @@ def run_all_validation_tests():
     else:
         print("\n" + "=" * 70)
         print("❌ Some validation tests failed")
-        print("🔧 Please fix the issues above and run: tren system health --verify")
+        print("🔧 Please fix the issues above and run: pytest tests/environment/test_setup_validation.py -v")
         print("=" * 70)
 
     return exit_code

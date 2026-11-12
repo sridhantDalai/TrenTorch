@@ -26,6 +26,8 @@ from platforms.cli.core.modules import (
     get_module_mapping,
     normalize_module_number,
 )
+from platforms.cli.core.state_schema import validate_milestones, validate_progress
+from platforms.cli.core.text import pluralize
 from platforms.cli.processes.milestone import check_and_run_milestone_unlocks
 
 from .reset import ModuleResetCommand
@@ -383,7 +385,10 @@ class ModuleWorkflowCommand(BaseCommand):
                 modules_left = len([r for r in required if r not in completed_nums])
                 if modules_left <= 3:
                     info_table.add_row("🏆 Milestone", f"[magenta]{mid} - {mname}[/magenta]")
-                    info_table.add_row("", f"[dim]{modules_left} modules until unlock[/dim]")
+                    info_table.add_row(
+                        "",
+                        f"[dim]{modules_left} {pluralize('module', modules_left)} until unlock[/dim]",
+                    )
 
         self.console.print(info_table)
         self.console.print()
@@ -579,6 +584,20 @@ class ModuleWorkflowCommand(BaseCommand):
 
         module_name = module_mapping[normalized]
 
+        # --skip-tests / --skip-export skip steps, not the requirement that the
+        # student's notebook exists. Skipped in maintainer-verification mode,
+        # which runs against src/ without a student notebook.
+        verify_solution = os.environ.get("TREN_DEV_VERIFY_SOLUTION") == "1"
+        if not verify_solution:
+            short_name = module_name.split("_", 1)[1] if "_" in module_name else module_name
+            notebook_file = (
+                self.config.project_root / "data" / "modules" / module_name / f"{short_name}.ipynb"
+            )
+            if not notebook_file.exists():
+                self.console.print(f"[yellow]⚠️  Module {normalized} not started yet[/yellow]")
+                self.console.print(f"💡 Run: [bold cyan]tren module start {normalized}[/bold cyan]")
+                return 1
+
         # Validate sequential completion: all previous modules must be completed.
         # Skipped in maintainer-verification mode (TREN_DEV_VERIFY_SOLUTION=1):
         # that mode's caller (dev/test.py's _run_inline_tests) already enforces
@@ -588,7 +607,6 @@ class ModuleWorkflowCommand(BaseCommand):
         # otherwise block module 02 on "complete module 01 first" even
         # immediately after module 01 itself just verified clean.
         module_num = int(normalized)
-        verify_solution = os.environ.get("TREN_DEV_VERIFY_SOLUTION") == "1"
         if module_num > 1 and not verify_solution:
             progress = self.get_progress_data()
             completed = progress.get("completed_modules", [])
@@ -787,13 +805,14 @@ class ModuleWorkflowCommand(BaseCommand):
 
         module_mapping = get_module_mapping()
         module_nums = sorted(module_mapping.keys(), key=int)
+        total = len(module_nums)
 
         console = self.console
         console.print(
             Panel(
-                f"[bold cyan]Completing All Modules ({len(module_nums)} total)[/bold cyan]\n\n"
+                f"[bold cyan]Completing All Modules ({total} total)[/bold cyan]\n\n"
                 "This will test and export each module in sequence.\n"
-                "[dim]Modules without notebooks will be skipped.[/dim]",
+                "[dim]Stops at the first module that has not been started.[/dim]",
                 title="🔄 Complete All Modules",
                 border_style="cyan",
                 box=box.ROUNDED,
@@ -801,23 +820,37 @@ class ModuleWorkflowCommand(BaseCommand):
         )
         console.print()
 
+        def _notebook_path(mod_name: str) -> Path:
+            short = mod_name.split("_", 1)[1] if "_" in mod_name else mod_name
+            return self.config.project_root / "data" / "modules" / mod_name / f"{short}.ipynb"
+
         passed = 0
         failed = 0
-        skipped = 0
+        stop_module_num = None
+        stop_module_name = None
+        unreached_with_notebook: list[tuple[str, str]] = []
+        not_started_remaining = 0
 
-        for module_num in module_nums:
+        for i, module_num in enumerate(module_nums):
             module_name = module_mapping[module_num]
-
-            # Check if notebook exists
-            short_name = module_name.split("_", 1)[1] if "_" in module_name else module_name
-            notebook_path = (
-                self.config.project_root / "data" / "modules" / module_name / f"{short_name}.ipynb"
-            )
+            notebook_path = _notebook_path(module_name)
 
             if not notebook_path.exists():
-                console.print(f"  [dim]⏭️  Module {module_num}: {module_name} (no notebook)[/dim]")
-                skipped += 1
-                continue
+                console.print(
+                    f"  [dim yellow]⏭️  Module {module_num}: {module_name}"
+                    " (not started - no notebook)[/dim yellow]"
+                )
+                stop_module_num = module_num
+                stop_module_name = module_name
+
+                # Classify every later module
+                for later_num in module_nums[i + 1 :]:
+                    later_name = module_mapping[later_num]
+                    if _notebook_path(later_name).exists():
+                        unreached_with_notebook.append((later_num, later_name))
+                    else:
+                        not_started_remaining += 1
+                break
 
             console.print(f"  [cyan]▶[/cyan] Module {module_num}: {module_name}...", end=" ")
 
@@ -837,27 +870,74 @@ class ModuleWorkflowCommand(BaseCommand):
 
         console.print()
 
-        if failed == 0:
+        # --- Summary and exit codes ---
+
+        if passed == 0 and failed == 0:
+            # Stopped at the very first module -- nothing completed
+            body_lines = [
+                "[bold yellow]No modules to complete[/bold yellow]\n",
+                f"Stopped at module {stop_module_num}: {stop_module_name} (not started)",
+            ]
+            if unreached_with_notebook:
+                names = ", ".join(f"{n}: {nm}" for n, nm in unreached_with_notebook)
+                body_lines.append(f"Not reached because of the gap: {names}")
+            body_lines.append(f"\n[dim]Hint: [cyan]tren module start {stop_module_num}[/cyan][/dim]")
             console.print(
                 Panel(
-                    f"[bold green]✅ All modules completed![/bold green]\n\n"
-                    f"Passed: {passed}  Skipped: {skipped}",
+                    "\n".join(body_lines),
+                    title="⚠️ Nothing Completed",
+                    border_style="yellow",
+                    box=box.ROUNDED,
+                )
+            )
+            return 1
+
+        if failed > 0:
+            skipped = total - passed - failed
+            console.print(
+                Panel(
+                    f"[bold red]❌ Module completion failed[/bold red]\n\n"
+                    f"Passed: {passed}  Failed: {failed}  Skipped: {skipped}",
+                    title="⚠️ Failure",
+                    border_style="red",
+                    box=box.ROUNDED,
+                )
+            )
+            return 1
+
+        if passed == total:
+            console.print(
+                Panel(
+                    f"[bold green]✅ All modules completed![/bold green]\n\nPassed: {passed}",
                     title="🎉 Success",
                     border_style="green",
                     box=box.ROUNDED,
                 )
             )
             return 0
+
+        # Partial completion -- stopped at an unstarted module
+        body_lines = [
+            f"[bold green]Completed {passed} of {total} {pluralize('module', total)}[/bold green]\n",
+            f"Stopped at module {stop_module_num}: {stop_module_name} (not started - no notebook)",
+        ]
+        if unreached_with_notebook:
+            names = ", ".join(f"{n}: {nm}" for n, nm in unreached_with_notebook)
+            body_lines.append(f"Not reached because of the gap: {names}")
+        if not_started_remaining > 0:
+            body_lines.append(
+                f"Not started: {not_started_remaining} {pluralize('module', not_started_remaining)}"
+            )
+        body_lines.append(f"\n[dim]Hint: [cyan]tren module start {stop_module_num}[/cyan][/dim]")
         console.print(
             Panel(
-                f"[bold red]❌ Module completion failed[/bold red]\n\n"
-                f"Passed: {passed}  Failed: {failed}  Skipped: {skipped}",
-                title="⚠️ Failure",
-                border_style="red",
+                "\n".join(body_lines),
+                title="📦 Progress Saved",
+                border_style="green",
                 box=box.ROUNDED,
             )
         )
-        return 1
+        return 0
 
     def _complete_module_quiet(
         self, module_num: str, module_name: str, skip_tests: bool, skip_export: bool
@@ -996,7 +1076,13 @@ class ModuleWorkflowCommand(BaseCommand):
             "last_updated": None,
             "completion_dates": [],
         }
-        return read_json_or_warn(progress_file, default, console=self.console, label="Your saved progress")
+        return read_json_or_warn(
+            progress_file,
+            default,
+            console=self.console,
+            label="Your saved progress",
+            validate=validate_progress,
+        )
 
     def save_progress_data(self, progress: dict) -> None:
         """Save progress data to user_data/progress.json."""
@@ -1249,11 +1335,14 @@ class ModuleWorkflowCommand(BaseCommand):
                 last_time = datetime.fromisoformat(last_updated)
                 time_diff = datetime.now() - last_time
                 if time_diff < timedelta(hours=1):
-                    last_activity = f"{int(time_diff.total_seconds() / 60)} minutes ago"
+                    minutes = int(time_diff.total_seconds() / 60)
+                    last_activity = f"{minutes} {pluralize('minute', minutes)} ago"
                 elif time_diff < timedelta(days=1):
-                    last_activity = f"{int(time_diff.total_seconds() / 3600)} hours ago"
+                    hours = int(time_diff.total_seconds() / 3600)
+                    last_activity = f"{hours} {pluralize('hour', hours)} ago"
                 else:
-                    last_activity = f"{time_diff.days} days ago"
+                    days = time_diff.days
+                    last_activity = f"{days} {pluralize('day', days)} ago"
             except Exception:
                 pass
 
@@ -1264,7 +1353,8 @@ class ModuleWorkflowCommand(BaseCommand):
             style="bold",
         )
         if streak_days > 0:
-            header_text.append(f"Streak: 🔥 {streak_days} days  •  ", style="dim")
+            streak_label = f"{streak_days} {pluralize('day', streak_days)}"
+            header_text.append(f"Streak: 🔥 {streak_label}  •  ", style="dim")
         header_text.append(f"Last activity: {last_activity}", style="dim")
 
         self.console.print(
@@ -1362,7 +1452,11 @@ class ModuleWorkflowCommand(BaseCommand):
         # Check which milestones have been run successfully.
         milestones_file = self.config.project_root / "user_data" / "milestones.json"
         milestones_data = read_json_or_warn(
-            milestones_file, {}, console=self.console, label="Your saved milestone progress"
+            milestones_file,
+            {},
+            console=self.console,
+            label="Your saved milestone progress",
+            validate=validate_milestones,
         )
         completed_milestones = milestones_data.get("completed_milestones", [])
 
